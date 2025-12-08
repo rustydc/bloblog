@@ -19,7 +19,7 @@ build-backend = "hatchling.build"
 packages = ["src/bloblog"]
 
 [tool.pytest.ini_options]
-testpaths = ["src/tests"]
+testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 

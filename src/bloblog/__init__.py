@@ -1,20 +1,23 @@
 from .bloblog import BlobLogWriter, BlobLogReader, HEADER_STRUCT, amerge
-from .node import NodeSpec, ChannelSpec, Codec, Node
+from .node import ChannelSpec, Codec, Node, Input, Output, run_nodes, validate_nodes
+from .playback import LogPlayer, make_playback_nodes, playback_nodes
 from .pubsub import Pub, Sub
-from .runner import run_nodes, validate_nodes, Channel
 
 __all__ = [
     "BlobLogWriter",
     "BlobLogReader", 
     "HEADER_STRUCT",
     "amerge",
-    "NodeSpec",
     "ChannelSpec",
     "Codec",
     "Node",
+    "Input",
+    "Output",
     "Pub",
     "Sub",
     "run_nodes",
     "validate_nodes",
-    "Channel",
+    "add_playback_nodes",
+    "playback_nodes",
+    "LogPlayer",
 ]

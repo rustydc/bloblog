@@ -7,12 +7,10 @@ import weakref
 from typing import BinaryIO
 from time import time_ns
 from pathlib import Path
-from typing import Callable, AsyncGenerator, Awaitable, TypeVar, Union
+from typing import Callable, AsyncGenerator, Awaitable
 from collections import defaultdict
 from heapq import heappush, heappop
 import struct
-
-T = TypeVar('T')
 
 HEADER_STRUCT = struct.Struct('<QQ')
 
@@ -162,7 +160,7 @@ async def read_channel(path: Path) -> AsyncGenerator[tuple[int, memoryview], Non
             await asyncio.sleep(0)  # Yield to event loop
 
 
-async def amerge(*iterables: AsyncGenerator[tuple[int, T], None]) -> AsyncGenerator[tuple[int, int, T], None]:
+async def amerge[T](*iterables: AsyncGenerator[tuple[int, T], None]) -> AsyncGenerator[tuple[int, int, T], None]:
     """Merge async iterables in sorted order by timestamp.
     
     Yields (source_index, timestamp, item) tuples.
