@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Buffer
 from abc import abstractmethod, ABC
-from dataclasses import dataclass
 from pathlib import Path
 from typing import overload
 
@@ -69,12 +68,6 @@ class Output[T]:
         setattr(obj, self._attr_name, value)
 
 
-@dataclass
-class ChannelSpec[T]:
-    name: str
-    codec: Codec[T]
-
-
 class Node(ABC):
     """Base class for processing nodes.
     
@@ -98,14 +91,6 @@ class Node(ABC):
         """Return list of (attr_name, Output) for this node."""
         return [(name, attr) for name in dir(self.__class__) 
                 if isinstance(attr := getattr(self.__class__, name), Output)]
-    
-    def get_input_specs(self) -> list[ChannelSpec]:
-        """Return channel specs for all inputs."""
-        return [ChannelSpec(inp.name, inp.codec) for _, inp in self.get_inputs()]
-    
-    def get_output_specs(self) -> list[ChannelSpec]:
-        """Return channel specs for all outputs."""
-        return [ChannelSpec(out.name, out.codec) for _, out in self.get_outputs()]
 
     @abstractmethod
     async def run(self) -> None:
