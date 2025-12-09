@@ -11,27 +11,27 @@ class TestValidateNodes:
         producer = make_producer_node("producer", ["msg"])
         consumer, _ = make_consumer_node("consumer", "producer_output", 1)
         
-        # Should not raise
-        validate_nodes([producer, consumer])
+        # Should not raise (codecs inline so no registry needed)
+        validate_nodes([producer, consumer], {})
 
     def test_duplicate_output_channel_raises(self):
         producer1 = make_producer_node("producer", ["msg"])
         producer2 = make_producer_node("producer", ["msg"])  # Same output channel name
         
         with pytest.raises(ValueError, match="produced by multiple nodes"):
-            validate_nodes([producer1, producer2])
+            validate_nodes([producer1, producer2], {})
 
     def test_missing_input_producer_raises(self):
         consumer, _ = make_consumer_node("consumer", "nonexistent_channel", 1)
         
         with pytest.raises(ValueError, match="has no producer node"):
-            validate_nodes([consumer])
+            validate_nodes([consumer], {})
 
     def test_producer_only_is_valid(self):
         producer = make_producer_node("producer", ["msg"])
         
         # Should not raise - producer with no consumers is valid
-        validate_nodes([producer])
+        validate_nodes([producer], {})
 
 
 class TestRunNodes:

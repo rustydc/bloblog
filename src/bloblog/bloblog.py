@@ -1,9 +1,11 @@
+"""Bloblog binary log format and I/O implementation."""
 from __future__ import annotations
 
 import asyncio
 import mmap
 import os
 import weakref
+from collections.abc import Buffer
 from typing import BinaryIO
 from time import time_ns
 from pathlib import Path
@@ -24,25 +26,25 @@ class BlobLogWriter:
     def __init__(self, log_dir: Path):
         self.log_dir = log_dir
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.queues: dict[Path, asyncio.Queue[tuple[int, bytes] | None]] = {}
+        self.queues: dict[Path, asyncio.Queue[tuple[int, Buffer] | None]] = {}
         self.tasks: dict[Path, asyncio.Task] = {}
 
-    def get_writer(self, channel: str) -> Callable[[bytes], None]:
+    def get_writer(self, channel: str) -> Callable[[Buffer], None]:
         path = self.log_dir / f"{channel}.bloblog"
         
         if path not in self.queues:
-            queue: asyncio.Queue[tuple[int, bytes] | None] = asyncio.Queue()
+            queue: asyncio.Queue[tuple[int, Buffer] | None] = asyncio.Queue()
             self.queues[path] = queue
             self.tasks[path] = asyncio.create_task(self._writer_task(path, queue))
         
         queue = self.queues[path]
         
-        def write(data: bytes) -> None:
+        def write(data: Buffer) -> None:
             queue.put_nowait((time_ns(), data))
         
         return write
 
-    async def _writer_task(self, path: Path, queue: asyncio.Queue[tuple[int, bytes] | None]) -> None:
+    async def _writer_task(self, path: Path, queue: asyncio.Queue[tuple[int, Buffer] | None]) -> None:
         fd = await asyncio.to_thread(os.open, path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
         try:
             while True:
@@ -61,8 +63,11 @@ class BlobLogWriter:
                 # Write all at once, respecting IOV_MAX limit
                 chunks = []
                 for time, data in items:
-                    chunks.append(HEADER_STRUCT.pack(time, len(data)))
-                    chunks.append(data)
+                    # Convert Buffer to bytes/memoryview for len() and writev()
+                    # This is zero-copy for bytes, memoryview, bytearray
+                    data_mv = memoryview(data)
+                    chunks.append(HEADER_STRUCT.pack(time, len(data_mv)))
+                    chunks.append(data_mv)
                 
                 # writev has a limit (IOV_MAX), so batch if needed
                 for i in range(0, len(chunks), IOV_MAX):

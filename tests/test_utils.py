@@ -1,7 +1,8 @@
 """Shared test utilities for node testing."""
-from collections.abc import Buffer, Callable
+from collections.abc import Buffer, Callable, Awaitable
+from typing import Annotated
 
-from bloblog import Codec, Node, Input, Output
+from bloblog import Codec, In, Out
 
 
 class StringCodec(Codec[str]):
@@ -12,49 +13,46 @@ class StringCodec(Codec[str]):
         return bytes(data).decode("utf-8")
 
 
-def make_producer_node(name: str, messages: list[str]) -> Node:
+def make_producer_node(name: str, messages: list[str]) -> Callable[..., Awaitable[None]]:
     """Create a producer node that outputs messages."""
     
-    class ProducerNode(Node):
-        output: Output[str] = Output(f"{name}_output", StringCodec())
-        
-        async def run(self) -> None:
-            for msg in messages:
-                await self.output.publish(msg)
+    async def producer_node(
+        output: Annotated[Out[str], f"{name}_output", StringCodec()],
+    ):
+        for msg in messages:
+            await output.publish(msg)
     
-    return ProducerNode()
+    return producer_node
 
 
-def make_consumer_node(name: str, input_channel: str, expected_count: int) -> tuple[Node, list[str]]:
+def make_consumer_node(name: str, input_channel: str, expected_count: int) -> tuple[Callable[..., Awaitable[None]], list[str]]:
     """Create a consumer node that collects messages."""
     received: list[str] = []
     
-    class ConsumerNode(Node):
-        input: Input[str] = Input(input_channel, StringCodec())
-        
-        async def run(self) -> None:
-            async for msg in self.input:
-                received.append(msg)
-                if len(received) >= expected_count:
-                    break
+    async def consumer_node(
+        input: Annotated[In[str], input_channel, StringCodec()],
+    ):
+        async for msg in input:
+            received.append(msg)
+            if len(received) >= expected_count:
+                break
     
-    return ConsumerNode(), received
+    return consumer_node, received
 
 
 def make_transform_node(name: str, input_channel: str, output_channel: str,
-                        transform: Callable[[str], str], expected_count: int) -> Node:
+                        transform, expected_count: int) -> Callable[..., Awaitable[None]]:
     """Create a transform node that processes messages."""
     
-    class TransformNode(Node):
-        input: Input[str] = Input(input_channel, StringCodec())
-        output: Output[str] = Output(output_channel, StringCodec())
-        
-        async def run(self) -> None:
-            count = 0
-            async for msg in self.input:
-                await self.output.publish(transform(msg))
-                count += 1
-                if count >= expected_count:
-                    break
+    async def transform_node(
+        input: Annotated[In[str], input_channel, StringCodec()],
+        output: Annotated[Out[str], output_channel, StringCodec()],
+    ):
+        count = 0
+        async for msg in input:
+            await output.publish(transform(msg))
+            count += 1
+            if count >= expected_count:
+                break
     
-    return TransformNode()
+    return transform_node

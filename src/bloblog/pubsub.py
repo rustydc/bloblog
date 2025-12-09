@@ -1,3 +1,4 @@
+"""Simple pub-sub implementation for bloblog nodes."""
 import asyncio
 
 class _Closed:
@@ -6,32 +7,42 @@ class _Closed:
 
 _CLOSED = _Closed()
 
-class Pub[T]:
+class Out[T]:
+    """Output channel from a node.
+    
+    Nodes publish data to outputs. The framework automatically
+    closes outputs when nodes complete.
+    """
     def __init__(self) -> None:
-        self.subscribers: list[Sub[T]] = []
+        self.subscribers: list[In[T]] = []
 
-    def sub(self) -> "Sub[T]":
-        sub: Sub[T] = Sub()
+    def sub(self) -> "In[T]":
+        """Create a subscriber (used internally by framework)."""
+        sub: In[T] = In()
         self.subscribers.append(sub)
         return sub
     
     async def publish(self, data: T) -> None:
-        async with asyncio.TaskGroup() as tg:
-            for sub in self.subscribers:
-                tg.create_task(sub._queue.put(data))
+        """Publish data to all subscribers."""
+        await asyncio.gather(*[sub._queue.put(data) for sub in self.subscribers])
 
     async def close(self) -> None:
-        """Signal all subscribers that the stream has ended."""
-        async with asyncio.TaskGroup() as tg:
-            for sub in self.subscribers:
-                tg.create_task(sub._queue.put(_CLOSED))
+        """Signal all subscribers that the stream has ended.
+        
+        Called by framework, not by nodes.
+        """
+        await asyncio.gather(*[sub._queue.put(_CLOSED) for sub in self.subscribers])
 
-class Sub[T]:
+class In[T]:
+    """Input channel to a node.
+    
+    Nodes iterate over inputs to receive data.
+    """
     def __init__(self) -> None:
         self._queue: asyncio.Queue[T | _Closed] = asyncio.Queue(10)
         self._closed = False
 
-    def __aiter__(self) -> "Sub[T]":
+    def __aiter__(self) -> "In[T]":
         return self
 
     async def __anext__(self) -> T:
