@@ -1,18 +1,24 @@
 """Simple pub-sub implementation for bloblog nodes."""
+
 import asyncio
+
 
 class _Closed:
     """Sentinel value to signal end of stream."""
+
     pass
+
 
 _CLOSED = _Closed()
 
+
 class Out[T]:
     """Output channel from a node.
-    
+
     Nodes publish data to outputs. The framework automatically
     closes outputs when nodes complete.
     """
+
     def __init__(self) -> None:
         self.subscribers: list[In[T]] = []
 
@@ -21,23 +27,25 @@ class Out[T]:
         sub: In[T] = In()
         self.subscribers.append(sub)
         return sub
-    
+
     async def publish(self, data: T) -> None:
         """Publish data to all subscribers."""
         await asyncio.gather(*[sub._queue.put(data) for sub in self.subscribers])
 
     async def close(self) -> None:
         """Signal all subscribers that the stream has ended.
-        
+
         Called by framework, not by nodes.
         """
         await asyncio.gather(*[sub._queue.put(_CLOSED) for sub in self.subscribers])
 
+
 class In[T]:
     """Input channel to a node.
-    
+
     Nodes iterate over inputs to receive data.
     """
+
     def __init__(self) -> None:
         self._queue: asyncio.Queue[T | _Closed] = asyncio.Queue(10)
         self._closed = False

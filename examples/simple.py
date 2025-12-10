@@ -2,12 +2,13 @@
 
 Run with: uv run python -m examples.simple
 """
+
 import asyncio
 from pathlib import Path
-from typing import Annotated
 from tempfile import TemporaryDirectory
+from typing import Annotated
 
-from bloblog import In, Out, run, playback, enable_pickle_codec
+from bloblog import In, Out, enable_pickle_codec, playback, run
 
 
 # Example 1: Simple function node
@@ -45,18 +46,18 @@ async def consumer(
 # Example 4: Stateful class-based node
 class Counter:
     """Node with state."""
-    
+
     def __init__(self, prefix: str = "Count"):
         self.prefix = prefix
         self.count = 0
-    
+
     async def run(
         self,
         messages: Annotated[In[str], "messages"],
         counted_out: Annotated[Out[str], "counted"],
     ):
         """Add counter to each message."""
-        print(f"Counter: Starting...")
+        print("Counter: Starting...")
         async for msg in messages:
             self.count += 1
             counted = f"[{self.prefix} {self.count}] {msg}"
@@ -71,20 +72,20 @@ async def main():
 
     with TemporaryDirectory(delete=False) as log_dir:
         log_path = Path(log_dir)
-    
+
         print("Example 1: Simple Pipeline (Producer -> Uppercase -> Consumer)")
 
         await run([producer, uppercase, consumer])
-        
+
         print("\n\nExample 2: With Stateful Node (Producer -> Counter)")
 
         counter = Counter(prefix="Item")
-        
+
         # Consumer for counted messages
         async def consumer2(input: Annotated[In[str], "counted"]):
             async for msg in input:
                 print(f"Consumer2: {msg}")
-        
+
         await run([producer, counter.run, consumer2], log_dir=log_path)
 
         print("\n\nExample 3: Playback")
