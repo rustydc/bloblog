@@ -7,11 +7,12 @@ import sys
 from pathlib import Path
 from collections.abc import Buffer
 from typing import Annotated
+from tempfile import TemporaryDirectory
 
 # Add src to path for development
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from bloblog import In, Out, run_nodes, Codec
+from bloblog import In, Out, run_nodes, Codec, playback_nodes
 
 
 class StringCodec(Codec[str]):
@@ -25,7 +26,7 @@ class StringCodec(Codec[str]):
 
 # Example 1: Simple function node
 async def producer(
-    output: Annotated[Out[str], "messages"],
+    output: Annotated[Out[str], "messages", StringCodec()],
 ):
     """Producer node - just a function!"""
     print("Producer: Starting...")
@@ -33,14 +34,14 @@ async def producer(
         msg = f"Message {i}"
         print(f"Producer: Sending '{msg}'")
         await output.publish(msg)
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.5)
     print("Producer: Done")
 
 
 # Example 2: Transform node
 async def uppercase(
     input: Annotated[In[str], "messages"],
-    output: Annotated[Out[str], "uppercase"],
+    output: Annotated[Out[str], "uppercase", StringCodec()],
 ):
     """Transform messages to uppercase."""
     print("Uppercase: Starting...")
@@ -73,7 +74,7 @@ class Counter:
     async def run(
         self,
         input: Annotated[In[str], "messages"],
-        output: Annotated[Out[str], "counted"],
+        output: Annotated[Out[str], "counted", StringCodec()],
     ):
         """Add counter to each message."""
         print(f"Counter: Starting...")
@@ -87,40 +88,33 @@ class Counter:
 
 async def main():
     """Run example pipelines."""
-    
-    print("Example 1: Simple Pipeline (Producer -> Uppercase -> Consumer)")
-    
-    # Define channels once
-    channels: dict[str, Codec] = {
-        "messages": StringCodec(),
-        "uppercase": StringCodec(),
-    }
 
-    await run_nodes(
-        [producer, uppercase, consumer],
-        channels=channels,
-    )
+    with TemporaryDirectory() as log_dir:
+        log_path = Path(log_dir)
     
-    print("\nExample 2: With Stateful Node (Producer -> Counter)")
+        print("Example 1: Simple Pipeline (Producer -> Uppercase -> Consumer)")
 
-    channels2: dict[str, Codec] = {
-        "messages": StringCodec(),
-        "counted": StringCodec(),
-    }
+        await run_nodes([producer, uppercase, consumer])
+        
+        print("\n\nExample 2: With Stateful Node (Producer -> Counter)")
 
-    counter = Counter(prefix="Item")
-    
-    # Consumer for counted messages
-    async def consumer2(input: Annotated[In[str], "counted"]):
-        async for msg in input:
-            print(f"Consumer2: {msg}")
-    
-    await run_nodes(
-        [producer, counter.run, consumer2],
-        channels=channels2,
-    )
-    
-    print("Done!")
+        counter = Counter(prefix="Item")
+        
+        # Consumer for counted messages
+        async def consumer2(input: Annotated[In[str], "counted"]):
+            async for msg in input:
+                print(f"Consumer2: {msg}")
+        
+        await run_nodes([producer, counter.run, consumer2], log_dir=log_path)
+
+        print("\n\nExample 3: Playback")
+
+        await playback_nodes([consumer2], playback_dir=log_path)
+
+        print("\n\nExample 4: Playback (4.0x)")
+        await playback_nodes([consumer2], playback_dir=log_path, playback_speed=4.0)
+
+        print("Done!")
 
 
 if __name__ == "__main__":
