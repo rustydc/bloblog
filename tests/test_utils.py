@@ -30,7 +30,7 @@ def make_consumer_node(name: str, input_channel: str, expected_count: int) -> tu
     received: list[str] = []
     
     async def consumer_node(
-        input: Annotated[In[str], input_channel, StringCodec()],
+        input: Annotated[In[str], input_channel],
     ):
         async for msg in input:
             received.append(msg)
@@ -45,7 +45,7 @@ def make_transform_node(name: str, input_channel: str, output_channel: str,
     """Create a transform node that processes messages."""
     
     async def transform_node(
-        input: Annotated[In[str], input_channel, StringCodec()],
+        input: Annotated[In[str], input_channel],
         output: Annotated[Out[str], output_channel, StringCodec()],
     ):
         count = 0

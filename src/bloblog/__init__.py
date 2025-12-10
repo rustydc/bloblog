@@ -1,5 +1,6 @@
 from .bloblog import BlobLogWriter, BlobLogReader, HEADER_STRUCT, amerge
-from .node import Codec, run_nodes, validate_nodes
+from .codecs import Codec
+from .node import run_nodes, validate_nodes
 from .playback import make_log_player, make_playback_nodes, playback_nodes
 from .pubsub import In, Out
 

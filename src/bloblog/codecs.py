@@ -1,0 +1,101 @@
+"""Codec system for encoding/decoding channel data in bloblog."""
+from __future__ import annotations
+
+import pickle
+import io
+from collections.abc import Buffer
+from abc import ABC, abstractmethod
+
+
+# Global codec registry - populated automatically when Codec subclasses are defined
+_CODEC_REGISTRY: dict[str, type['Codec']] = {}
+
+
+class Codec[T](ABC):
+    """Abstract base class for encoding/decoding channel data.
+    
+    Codecs are automatically registered in the global registry when defined.
+    This allows log files to be self-describing with codec metadata.
+    """
+    
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # Auto-register when subclass is defined
+        qualified_name = f"{cls.__module__}.{cls.__qualname__}"
+        _CODEC_REGISTRY[qualified_name] = cls
+    
+    @abstractmethod
+    def encode(self, item: T) -> Buffer:
+        ...
+    
+    @abstractmethod
+    def decode(self, data: Buffer) -> T:
+        ...
+    
+    @classmethod
+    def get_qualified_name(cls) -> str:
+        """Get the fully qualified name of this codec class."""
+        return f"{cls.__module__}.{cls.__qualname__}"
+
+
+class _RestrictedUnpickler(pickle.Unpickler):
+    """Unpickler that only allows registered codec classes and safe builtins."""
+    
+    def find_class(self, module, name):
+        # This is called for every class pickle tries to instantiate
+        qualified_name = f"{module}.{name}"
+        
+        # Allow registered codecs
+        if qualified_name in _CODEC_REGISTRY:
+            return _CODEC_REGISTRY[qualified_name]
+        
+        # Allow safe builtins that codecs might use
+        safe_modules = {
+            'builtins': {'int', 'float', 'str', 'bytes', 'list', 'dict', 'tuple', 
+                        'set', 'frozenset', 'bool', 'NoneType'},
+            'collections': {'OrderedDict', 'defaultdict', 'Counter'},
+        }
+        if module in safe_modules and name in safe_modules[module]:
+            return super().find_class(module, name)
+        
+        raise pickle.UnpicklingError(
+            f"Attempted to unpickle unauthorized class: {qualified_name}. "
+            f"Only registered Codec subclasses are allowed."
+        )
+
+
+def safe_unpickle_codec(data: bytes, expected_classname: str) -> Codec:
+    """Safely unpickle a codec, only allowing registered classes.
+    
+    Args:
+        data: Pickled codec bytes.
+        expected_classname: The qualified classname we expect.
+    
+    Returns:
+        The unpickled Codec instance.
+    
+    Raises:
+        ValueError: If codec class is not registered or doesn't match expected.
+        pickle.UnpicklingError: If unpickling attempts to load unauthorized class.
+    """
+    if expected_classname not in _CODEC_REGISTRY:
+        raise ValueError(
+            f"Codec class not registered: {expected_classname}. "
+            f"Make sure the codec module is imported."
+        )
+    
+    unpickler = _RestrictedUnpickler(io.BytesIO(data))
+    codec = unpickler.load()
+    
+    # Verify it's the expected type
+    actual_classname = f"{codec.__class__.__module__}.{codec.__class__.__qualname__}"
+    if actual_classname != expected_classname:
+        raise ValueError(
+            f"Codec class mismatch: expected {expected_classname}, "
+            f"got {actual_classname}"
+        )
+    
+    if not isinstance(codec, Codec):
+        raise ValueError(f"Unpickled object is not a Codec: {type(codec)}")
+    
+    return codec

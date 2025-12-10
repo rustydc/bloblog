@@ -31,7 +31,7 @@ class TestPlayback:
         received: list[str] = []
         
         async def live_consumer(
-            input: Annotated[In[str], "producer_output", codec]
+            input: Annotated[In[str], "producer_output"]
         ) -> None:
             async for msg in input:
                 received.append(msg)
@@ -47,10 +47,9 @@ class TestPlayback:
     @pytest.mark.asyncio
     async def test_playback_nodes_validates_log_exists(self, tmp_path):
         """Test that make_playback_nodes raises if log file doesn't exist."""
-        codec = StringCodec()
         
         async def consumer_of_missing(
-            input: Annotated[In[str], "missing_channel", codec]
+            input: Annotated[In[str], "missing_channel"]
         ) -> None:
             pass
         

@@ -3,24 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Buffer, Callable, Awaitable
-from abc import ABC, abstractmethod
+import pickle
+from collections.abc import Callable, Awaitable
 from pathlib import Path
 from typing import Annotated, Any, get_type_hints, get_origin, get_args
 
 from .pubsub import In, Out
 from .bloblog import BlobLogWriter
-
-
-class Codec[T](ABC):
-    """Abstract base class for encoding/decoding channel data."""
-    @abstractmethod
-    def encode(self, item: T) -> Buffer:
-        ...
-    
-    @abstractmethod
-    def decode(self, data: Buffer) -> T:
-        ...
+from .codecs import Codec
 
 
 class _ChannelRuntime[T]:
@@ -33,25 +23,24 @@ class _ChannelRuntime[T]:
 
 def _parse_node_signature(
     node_fn: Callable,
-    codec_registry: dict[str, Codec],
-) -> tuple[dict[str, tuple[str, Codec]], dict[str, tuple[str, Codec]]]:
+) -> tuple[dict[str, str], dict[str, tuple[str, Codec]]]:
     """Parse a node function's signature to extract input/output channels.
     
     Args:
         node_fn: The node function or bound method to inspect.
-        codec_registry: Registry of channel codecs.
     
     Returns:
-        (inputs, outputs) where each is a dict mapping:
-        param_name -> (channel_name, codec)
+        (inputs, outputs) where:
+        - inputs maps param_name -> channel_name (no codec)
+        - outputs maps param_name -> (channel_name, codec)
     
     Raises:
-        ValueError: If signature is invalid or codecs are missing.
+        ValueError: If signature is invalid or codecs are missing from outputs.
     """
     sig = inspect.signature(node_fn)
     hints = get_type_hints(node_fn, include_extras=True)
     
-    inputs: dict[str, tuple[str, Codec]] = {}
+    inputs: dict[str, str] = {}
     outputs: dict[str, tuple[str, Codec]] = {}
     
     for param_name, param in sig.parameters.items():
@@ -69,38 +58,44 @@ def _parse_node_signature(
         if get_origin(hint) is not Annotated:
             raise ValueError(
                 f"Parameter '{param_name}' in {node_fn.__name__}() "
-                f"must be Annotated[In[T], ...] or Annotated[Out[T], ...]"
+                f"must be Annotated[In[T], \"channel\"] or Annotated[Out[T], \"channel\", codec]"
             )
         
         # Parse Annotated[In[T] | Out[T], channel_name, codec?]
         args = get_args(hint)
         if len(args) < 2:
             raise ValueError(
-                f"Parameter '{param_name}' must be Annotated[In[T], channel_name] "
-                f"or Annotated[In[T], channel_name, codec]"
+                f"Parameter '{param_name}' must be Annotated[In[T], \"channel\"] "
+                f"or Annotated[Out[T], \"channel\", codec]"
             )
         
         base_type = args[0]  # In[T] or Out[T]
         channel_name = args[1]  # "camera"
-        
-        # Codec can be in annotation (3rd arg) or registry
-        codec: Codec
-        if len(args) >= 3:
-            codec = args[2]
-        elif channel_name in codec_registry:
-            codec = codec_registry[channel_name]
-        else:
-            raise ValueError(
-                f"Channel '{channel_name}' used by {node_fn.__name__}() "
-                f"needs a codec. Provide it in the annotation or channels config."
-            )
-        
         origin = get_origin(base_type)
         
         if origin is In:
-            inputs[param_name] = (channel_name, codec)
+            # Inputs must have exactly 2 args (no codec)
+            if len(args) != 2:
+                raise ValueError(
+                    f"Input parameter '{param_name}' must be Annotated[In[T], \"channel\"] "
+                    f"(codec discovered from output/log)"
+                )
+            inputs[param_name] = channel_name
+            
         elif origin is Out:
+            # Outputs must have exactly 3 args (codec required)
+            if len(args) != 3:
+                raise ValueError(
+                    f"Output parameter '{param_name}' must be Annotated[Out[T], \"channel\", codec]"
+                )
+            codec = args[2]
+            if not isinstance(codec, Codec):
+                raise ValueError(
+                    f"Output parameter '{param_name}' codec must be a Codec instance, "
+                    f"got {type(codec)}"
+                )
             outputs[param_name] = (channel_name, codec)
+            
         else:
             raise ValueError(
                 f"Parameter '{param_name}' must be In[T] or Out[T], got {base_type}"
@@ -111,13 +106,11 @@ def _parse_node_signature(
 
 def validate_nodes(
     nodes: list[Callable],
-    codec_registry: dict[str, Codec],
 ) -> None:
     """Validate that node inputs/outputs are properly connected.
     
     Args:
         nodes: List of node callables.
-        codec_registry: Registry of channel codecs.
     
     Raises:
         ValueError: If validation fails.
@@ -126,7 +119,7 @@ def validate_nodes(
     
     # Collect all outputs
     for node_fn in nodes:
-        _, outputs = _parse_node_signature(node_fn, codec_registry)
+        _, outputs = _parse_node_signature(node_fn)
         for param_name, (channel_name, codec) in outputs.items():
             if channel_name in output_channels:
                 raise ValueError(
@@ -138,8 +131,8 @@ def validate_nodes(
     
     # Check all inputs have corresponding outputs
     for node_fn in nodes:
-        inputs, _ = _parse_node_signature(node_fn, codec_registry)
-        for param_name, (channel_name, codec) in inputs.items():
+        inputs, _ = _parse_node_signature(node_fn)
+        for param_name, channel_name in inputs.items():
             if channel_name not in output_channels:
                 raise ValueError(
                     f"Input channel '{channel_name}' in {node_fn.__name__}() "
@@ -148,9 +141,28 @@ def validate_nodes(
 
 
 async def _logging_task(channel: _ChannelRuntime, writer: BlobLogWriter) -> None:
-    """Subscribe to a channel and log all messages to a bloblog file."""
+    """Subscribe to a channel and log all messages to a bloblog file.
+    
+    Writes codec metadata as the first record for self-describing logs.
+    """
     sub = channel.out.sub()
     write = writer.get_writer(channel.name)
+    
+    # Write codec metadata as first record
+    codec_classname = channel.codec.get_qualified_name()
+    codec_bytes = await asyncio.to_thread(pickle.dumps, channel.codec)
+    
+    # Encode as: [classname_length, classname_bytes, codec_length, codec_bytes]
+    classname_encoded = codec_classname.encode('utf-8')
+    metadata = (
+        len(classname_encoded).to_bytes(4, 'little') +
+        classname_encoded +
+        len(codec_bytes).to_bytes(4, 'little') +
+        codec_bytes
+    )
+    write(metadata)
+    
+    # Write regular data
     async for item in sub:
         data = await asyncio.to_thread(channel.codec.encode, item)
         write(data)
@@ -158,7 +170,6 @@ async def _logging_task(channel: _ChannelRuntime, writer: BlobLogWriter) -> None
 
 async def run_nodes(
     nodes: list[Callable[..., Awaitable[None]]],
-    channels: dict[str, Codec] | None = None,
     log_dir: Path | None = None,
 ) -> None:
     """Run a graph of nodes, optionally logging all channel data.
@@ -167,9 +178,7 @@ async def run_nodes(
         nodes: List of async callables (functions or bound methods).
                Each should have annotated parameters for channels:
                - Inputs: Annotated[In[T], "channel_name"]
-               - Outputs: Annotated[Out[T], "channel_name"]
-        channels: Optional dict mapping channel names to codecs.
-                  If None, codecs must be in node annotations.
+               - Outputs: Annotated[Out[T], "channel_name", codec_instance]
         log_dir: Optional directory to write log files for outputs.
     
     Raises:
@@ -185,18 +194,15 @@ async def run_nodes(
                 f"If using a class, pass instance.run not the instance itself."
             )
     
-    # Build codec registry
-    codec_registry: dict[str, Codec] = channels if channels else {}
-    
     # Validate nodes
-    validate_nodes(nodes, codec_registry)
+    validate_nodes(nodes)
     
     # Parse all node signatures once and build runtime channels
     runtime_channels: dict[str, _ChannelRuntime] = {}
     node_info: dict[Callable, tuple[dict, dict, dict[str, Any]]] = {}  # (inputs, outputs, kwargs)
     
     for node_fn in nodes:
-        inputs, outputs = _parse_node_signature(node_fn, codec_registry)
+        inputs, outputs = _parse_node_signature(node_fn)
         
         # Create runtime channels for outputs
         for param_name, (channel_name, codec) in outputs.items():
@@ -208,7 +214,7 @@ async def run_nodes(
     # Pre-build kwargs for all nodes to avoid race conditions
     # All subscriptions must be created BEFORE any node starts running
     for node_fn, (inputs, outputs, kwargs) in node_info.items():
-        for param_name, (channel_name, _) in inputs.items():
+        for param_name, channel_name in inputs.items():
             kwargs[param_name] = runtime_channels[channel_name].out.sub()
         
         for param_name, (channel_name, _) in outputs.items():
