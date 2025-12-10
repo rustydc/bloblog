@@ -1,7 +1,7 @@
 """Tests for default PickleCodec functionality."""
 import pytest
 from typing import Annotated
-from bloblog import In, Out, run_nodes, PickleCodec
+from bloblog import In, Out, run, PickleCodec
 
 
 class TestDefaultCodec:
@@ -20,7 +20,7 @@ class TestDefaultCodec:
             async for msg in input:
                 results.append(msg)
         
-        await run_nodes([producer, consumer])
+        await run([producer, consumer])
         assert results == ["hello", "world"]
     
     @pytest.mark.asyncio
@@ -36,7 +36,7 @@ class TestDefaultCodec:
             async for msg in input:
                 results.append(msg)
         
-        await run_nodes([producer, consumer])
+        await run([producer, consumer])
         assert results == [{"a": 1, "b": 2}, {"c": 3, "d": 4}]
     
     @pytest.mark.asyncio
@@ -56,7 +56,7 @@ class TestDefaultCodec:
             async for msg in input:
                 results.append(msg)
         
-        await run_nodes([producer, consumer])
+        await run([producer, consumer])
         assert len(results) == 1
         assert results[0]["nested"]["list"] == [1, 2, 3]
         assert results[0]["nested"]["tuple"] == (4, 5)
@@ -105,7 +105,7 @@ class TestDefaultCodec:
             async for msg in input:
                 results_custom.append(msg)
         
-        await run_nodes([producer1, producer2, consumer1, consumer2])
+        await run([producer1, producer2, consumer1, consumer2])
         
         assert results_default == ["default"]
         assert results_custom == ["custom"]

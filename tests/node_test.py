@@ -2,7 +2,7 @@
 import asyncio
 import pytest
 
-from bloblog import run_nodes, validate_nodes
+from bloblog import run, validate_nodes
 from test_utils import make_producer_node, make_consumer_node, make_transform_node
 
 
@@ -42,7 +42,7 @@ class TestRunNodes:
         producer = make_producer_node("producer", messages)
         consumer, received = make_consumer_node("consumer", "producer_output", len(messages))
 
-        await run_nodes([producer, consumer])
+        await run([producer, consumer])
 
         assert received == messages
 
@@ -54,7 +54,7 @@ class TestRunNodes:
         consumer1, received1 = make_consumer_node("consumer1", "producer_output", len(messages))
         consumer2, received2 = make_consumer_node("consumer2", "producer_output", len(messages))
 
-        await run_nodes([producer, consumer1, consumer2])
+        await run([producer, consumer1, consumer2])
 
         assert received1 == messages
         assert received2 == messages
@@ -73,7 +73,7 @@ class TestRunNodes:
         )
         consumer, received = make_consumer_node("consumer", "transformer_output", len(messages))
 
-        await run_nodes([producer, transformer, consumer])
+        await run([producer, transformer, consumer])
 
         assert received == ["HELLO", "WORLD"]
 
@@ -86,7 +86,7 @@ class TestRunNodes:
 
         # Should complete without hanging
         async with asyncio.timeout(1.0):
-            await run_nodes([producer, consumer])
+            await run([producer, consumer])
         
         assert received == messages
 
@@ -98,7 +98,7 @@ class TestRunNodes:
 
         # Should complete without error
         async with asyncio.timeout(1.0):
-            await run_nodes([producer])
+            await run([producer])
 
     @pytest.mark.asyncio
     async def test_validation_error_propagates(self):
@@ -106,4 +106,4 @@ class TestRunNodes:
         consumer, _ = make_consumer_node("consumer", "nonexistent_channel", 1)
 
         with pytest.raises(ValueError, match="has no producer node"):
-            await run_nodes([consumer])
+            await run([consumer])

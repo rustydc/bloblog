@@ -2,7 +2,7 @@
 import pytest
 from typing import Annotated
 
-from bloblog import In, Out, run_nodes, make_playback_nodes, playback_nodes
+from bloblog import In, Out, run, make_playback_nodes, playback
 from test_utils import StringCodec
 
 
@@ -21,7 +21,7 @@ class TestPlayback:
             for msg in messages:
                 await output.publish(msg)
         
-        await run_nodes([recording_producer], log_dir=tmp_path)
+        await run([recording_producer], log_dir=tmp_path)
         
         # Verify log file was created
         log_file = tmp_path / "producer_output.bloblog"
@@ -40,7 +40,7 @@ class TestPlayback:
         
         # playback_nodes adds log players for producer_output and runs everything
         output_dir = tmp_path / "output"
-        await playback_nodes([live_consumer], playback_dir=tmp_path, log_dir=output_dir)
+        await playback([live_consumer], playback_dir=tmp_path, log_dir=output_dir)
         
         assert received == messages
 

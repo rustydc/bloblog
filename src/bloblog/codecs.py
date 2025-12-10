@@ -16,13 +16,17 @@ class Codec[T](ABC):
     
     Codecs are automatically registered in the global registry when defined.
     This allows log files to be self-describing with codec metadata.
+    
+    To suppress auto-registration (e.g., for PickleCodec), set _auto_register=False
+    in the class definition.
     """
     
-    def __init_subclass__(cls, **kwargs):
+    def __init_subclass__(cls, _auto_register: bool = True, **kwargs):
         super().__init_subclass__(**kwargs)
-        # Auto-register when subclass is defined
-        qualified_name = f"{cls.__module__}.{cls.__qualname__}"
-        _CODEC_REGISTRY[qualified_name] = cls
+        # Auto-register when subclass is defined (unless suppressed)
+        if _auto_register:
+            qualified_name = f"{cls.__module__}.{cls.__qualname__}"
+            _CODEC_REGISTRY[qualified_name] = cls
     
     @abstractmethod
     def encode(self, item: T) -> Buffer:
@@ -38,11 +42,14 @@ class Codec[T](ABC):
         return f"{cls.__module__}.{cls.__qualname__}"
 
 
-class PickleCodec[T](Codec[T]):
+class PickleCodec[T](Codec[T], _auto_register=False):
     """Generic codec that uses pickle for serialization.
     
-    This is the default codec when none is specified for an output channel.
-    Works for any picklable Python object, but less efficient than specialized codecs.
+    This codec is NOT registered by default for security reasons.
+    Call enable_pickle_codec() to register it if needed.
+    
+    Works for any picklable Python object, but less efficient than specialized codecs
+    and carries pickle's security risks.
     """
     
     def encode(self, item: T) -> bytes:
@@ -78,38 +85,42 @@ class _RestrictedUnpickler(pickle.Unpickler):
         )
 
 
-def safe_unpickle_codec(data: bytes, expected_classname: str) -> Codec:
+def safe_unpickle_codec(data: bytes) -> Codec:
     """Safely unpickle a codec, only allowing registered classes.
     
     Args:
         data: Pickled codec bytes.
-        expected_classname: The qualified classname we expect.
     
     Returns:
         The unpickled Codec instance.
     
     Raises:
-        ValueError: If codec class is not registered or doesn't match expected.
+        ValueError: If codec class is not registered.
         pickle.UnpicklingError: If unpickling attempts to load unauthorized class.
     """
-    if expected_classname not in _CODEC_REGISTRY:
-        raise ValueError(
-            f"Codec class not registered: {expected_classname}. "
-            f"Make sure the codec module is imported."
-        )
-    
     unpickler = _RestrictedUnpickler(io.BytesIO(data))
     codec = unpickler.load()
     
-    # Verify it's the expected type
+    # Verify it's a registered codec
     actual_classname = f"{codec.__class__.__module__}.{codec.__class__.__qualname__}"
-    if actual_classname != expected_classname:
+    if actual_classname not in _CODEC_REGISTRY:
         raise ValueError(
-            f"Codec class mismatch: expected {expected_classname}, "
-            f"got {actual_classname}"
+            f"Codec class not registered: {actual_classname}. "
+            f"Make sure the codec module is imported."
         )
     
     if not isinstance(codec, Codec):
         raise ValueError(f"Unpickled object is not a Codec: {type(codec)}")
     
     return codec
+
+
+def enable_pickle_codec() -> None:
+    """Register PickleCodec in the global codec registry.
+    
+    Call this function to enable pickle-based serialization for channels.
+    Note: This should only be used when you trust the data source, as pickle
+    has known security vulnerabilities.
+    """
+    qualified_name = PickleCodec.get_qualified_name()
+    _CODEC_REGISTRY[qualified_name] = PickleCodec

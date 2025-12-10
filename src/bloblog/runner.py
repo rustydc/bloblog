@@ -155,19 +155,9 @@ async def _logging_task(channel: _ChannelRuntime, writer: BlobLogWriter) -> None
     sub = channel.out.sub()
     write = writer.get_writer(channel.name)
     
-    # Write codec metadata as first record
-    codec_classname = channel.codec.get_qualified_name()
+    # Write codec metadata as first record (pickled codec instance)
     codec_bytes = await asyncio.to_thread(pickle.dumps, channel.codec)
-    
-    # Encode as: [classname_length, classname_bytes, codec_length, codec_bytes]
-    classname_encoded = codec_classname.encode('utf-8')
-    metadata = (
-        len(classname_encoded).to_bytes(4, 'little') +
-        classname_encoded +
-        len(codec_bytes).to_bytes(4, 'little') +
-        codec_bytes
-    )
-    write(metadata)
+    write(codec_bytes)
     
     # Write regular data
     async for item in sub:
@@ -175,7 +165,7 @@ async def _logging_task(channel: _ChannelRuntime, writer: BlobLogWriter) -> None
         write(data)
 
 
-async def run_nodes(
+async def run(
     nodes: list[Callable[..., Awaitable[None]]],
     log_dir: Path | None = None,
 ) -> None:

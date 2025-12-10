@@ -8,8 +8,9 @@ import inspect
 import struct
 
 from .codecs import Codec, safe_unpickle_codec
-from .node import run_nodes, _parse_node_signature
+from .runner import run, _parse_node_signature
 from .pubsub import Out
+from .bloblog import BlobLogReader
 
 # Same header struct as bloblog.py
 HEADER_STRUCT = struct.Struct('<QQ')
@@ -36,26 +37,13 @@ def read_codec_from_log(path: Path) -> Codec:
         
         time, data_len = HEADER_STRUCT.unpack(header_bytes)
         
-        # Read codec metadata
-        codec_metadata = f.read(data_len)
-        if len(codec_metadata) < data_len:
+        # Read codec metadata (pickled codec)
+        codec_bytes = f.read(data_len)
+        if len(codec_bytes) < data_len:
             raise ValueError(f"Incomplete codec metadata in {path}")
         
-        # Decode: [classname_length, classname_bytes, codec_length, codec_bytes]
-        offset = 0
-        classname_len = int.from_bytes(codec_metadata[offset:offset+4], 'little')
-        offset += 4
-        
-        classname = codec_metadata[offset:offset+classname_len].decode('utf-8')
-        offset += classname_len
-        
-        codec_bytes_len = int.from_bytes(codec_metadata[offset:offset+4], 'little')
-        offset += 4
-        
-        codec_bytes = codec_metadata[offset:offset+codec_bytes_len]
-        
         # Safely unpickle the codec
-        return safe_unpickle_codec(bytes(codec_bytes), classname)
+        return safe_unpickle_codec(bytes(codec_bytes))
 
 
 def make_log_player(
@@ -79,8 +67,6 @@ def make_log_player(
         FileNotFoundError: If the log file doesn't exist.
         ValueError: If codec cannot be read from log.
     """
-    from .bloblog import BlobLogReader
-    
     path = log_dir / f"{channel_name}.bloblog"
     if not path.exists():
         raise FileNotFoundError(f"No log file found for channel '{channel_name}': {path}")
@@ -173,24 +159,24 @@ def make_playback_nodes(
     return log_players
 
 
-async def playback_nodes(
+async def playback(
     live_nodes: list[Callable],
     playback_dir: Path,
     log_dir: Path | None = None,
-    playback_speed: float = 0,
+    speed: float = 0,
 ) -> None:
     """Add playback nodes for any inputs not provided by live nodes, then run all nodes.
 
-    This is a convenience wrapper that combines make_playback_nodes() and run_nodes().
+    This is a convenience wrapper that combines make_playback_nodes() and run().
     Codecs are automatically read from log files.
 
     Args:
         live_nodes: The node callables to run live.
         playback_dir: Directory containing .bloblog files to play back from.
         log_dir: Optional directory to write output logs to.
-        playback_speed: Playback speed multiplier. 0 = as fast as possible, 1.0 = real-time.
+        speed: Playback speed multiplier. 0 = as fast as possible, 1.0 = real-time.
     """
-    playback = make_playback_nodes(live_nodes, playback_dir, playback_speed)
+    playback = make_playback_nodes(live_nodes, playback_dir, speed)
     all_nodes = live_nodes + playback
-    await run_nodes(all_nodes, log_dir=log_dir)
+    await run(all_nodes, log_dir=log_dir)
 
