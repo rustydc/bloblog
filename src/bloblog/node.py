@@ -58,7 +58,8 @@ def _parse_node_signature(
         if get_origin(hint) is not Annotated:
             raise ValueError(
                 f"Parameter '{param_name}' in {node_fn.__name__}() "
-                f"must be Annotated[In[T], \"channel\"] or Annotated[Out[T], \"channel\", codec]"
+                f"must be Annotated[In[T], \"channel\"] or "
+                f"Annotated[Out[T], \"channel\"] (or with explicit codec)"
             )
         
         # Parse Annotated[In[T] | Out[T], channel_name, codec?]
@@ -83,16 +84,22 @@ def _parse_node_signature(
             inputs[param_name] = channel_name
             
         elif origin is Out:
-            # Outputs must have exactly 3 args (codec required)
-            if len(args) != 3:
+            # Outputs can have 2 args (use PickleCodec) or 3 args (explicit codec)
+            if len(args) == 2:
+                # No codec specified, use PickleCodec as default
+                from .codecs import PickleCodec
+                codec = PickleCodec()
+            elif len(args) == 3:
+                codec = args[2]
+                if not isinstance(codec, Codec):
+                    raise ValueError(
+                        f"Output parameter '{param_name}' codec must be a Codec instance, "
+                        f"got {type(codec)}"
+                    )
+            else:
                 raise ValueError(
-                    f"Output parameter '{param_name}' must be Annotated[Out[T], \"channel\", codec]"
-                )
-            codec = args[2]
-            if not isinstance(codec, Codec):
-                raise ValueError(
-                    f"Output parameter '{param_name}' codec must be a Codec instance, "
-                    f"got {type(codec)}"
+                    f"Output parameter '{param_name}' must be "
+                    f"Annotated[Out[T], \"channel\"] or Annotated[Out[T], \"channel\", codec]"
                 )
             outputs[param_name] = (channel_name, codec)
             

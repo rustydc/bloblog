@@ -38,6 +38,20 @@ class Codec[T](ABC):
         return f"{cls.__module__}.{cls.__qualname__}"
 
 
+class PickleCodec[T](Codec[T]):
+    """Generic codec that uses pickle for serialization.
+    
+    This is the default codec when none is specified for an output channel.
+    Works for any picklable Python object, but less efficient than specialized codecs.
+    """
+    
+    def encode(self, item: T) -> bytes:
+        return pickle.dumps(item)
+    
+    def decode(self, data: Buffer) -> T:
+        return pickle.loads(bytes(data))
+
+
 class _RestrictedUnpickler(pickle.Unpickler):
     """Unpickler that only allows registered codec classes and safe builtins."""
     

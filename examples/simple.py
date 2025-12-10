@@ -25,9 +25,7 @@ class StringCodec(Codec[str]):
 
 
 # Example 1: Simple function node
-async def producer(
-    output: Annotated[Out[str], "messages", StringCodec()],
-):
+async def producer(output: Annotated[Out[str], "messages"]):
     """Producer node - just a function!"""
     print("Producer: Starting...")
     for i in range(5):
@@ -41,7 +39,7 @@ async def producer(
 # Example 2: Transform node
 async def uppercase(
     input: Annotated[In[str], "messages"],
-    output: Annotated[Out[str], "uppercase", StringCodec()],
+    output: Annotated[Out[str], "uppercase"],
 ):
     """Transform messages to uppercase."""
     print("Uppercase: Starting...")
@@ -73,16 +71,16 @@ class Counter:
     
     async def run(
         self,
-        input: Annotated[In[str], "messages"],
-        output: Annotated[Out[str], "counted", StringCodec()],
+        messages: Annotated[In[str], "messages"],
+        counted_out: Annotated[Out[str], "counted", StringCodec()],
     ):
         """Add counter to each message."""
         print(f"Counter: Starting...")
-        async for msg in input:
+        async for msg in messages:
             self.count += 1
             counted = f"[{self.prefix} {self.count}] {msg}"
             print(f"Counter: {msg} -> {counted}")
-            await output.publish(counted)
+            await counted_out.publish(counted)
         print(f"Counter: Done ({self.count} messages)")
 
 
