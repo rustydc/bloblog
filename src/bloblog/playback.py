@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Buffer
+import pickle
+from collections.abc import AsyncGenerator, Buffer, Callable
 from pathlib import Path
 from time import time_ns
 
-from .bloblog import amerge, read_channel
+from .bloblog import BlobLogWriter, amerge, read_channel
 from .codecs import Codec, safe_unpickle_codec
-from .pubsub import Out
+from .pubsub import In, Out
 
 
 async def read_channel_decoded(
@@ -37,6 +38,35 @@ async def read_channel_decoded(
     async for time, data in reader:
         item = codec.decode(data)
         yield time, item
+
+
+async def write_channel_encoded(
+    channel_name: str,
+    codec: Codec,
+    input_stream: In,
+    writer: BlobLogWriter,
+) -> None:
+    """Subscribe to a channel and write encoded objects to a bloblog file.
+    
+    Automatically writes codec metadata as the first record, then encodes
+    and writes all objects from the input stream. This mirrors read_channel_decoded().
+    
+    Args:
+        channel_name: Name of the channel to write.
+        codec: Codec to use for encoding objects.
+        input_stream: Input stream to read objects from.
+        writer: BlobLogWriter instance to write to.
+    """
+    write = writer.get_writer(channel_name)
+    
+    # Write codec metadata as first record (pickled codec instance)
+    codec_bytes = await asyncio.to_thread(pickle.dumps, codec)
+    write(codec_bytes)
+    
+    # Write encoded objects
+    async for item in input_stream:
+        data = await asyncio.to_thread(codec.encode, item)
+        write(data)
 
 
 async def _playback_task(

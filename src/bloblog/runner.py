@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import pickle
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated, Any, get_args, get_origin, get_type_hints
 
 from .bloblog import BlobLogWriter
-from .codecs import Codec
+from .codecs import Codec, PickleCodec
+from .playback import write_channel_encoded, _playback_task
 from .pubsub import In, Out
 
 
@@ -87,8 +87,6 @@ def _parse_node_signature(
             # Outputs can have 2 args (use PickleCodec) or 3 args (explicit codec)
             if len(args) == 2:
                 # No codec specified, use PickleCodec as default
-                from .codecs import PickleCodec
-
                 codec = PickleCodec()
             elif len(args) == 3:
                 codec = args[2]
@@ -148,19 +146,11 @@ def validate_nodes(
 async def _logging_task(channel: _ChannelRuntime, writer: BlobLogWriter) -> None:
     """Subscribe to a channel and log all messages to a bloblog file.
 
-    Writes codec metadata as the first record for self-describing logs.
+    Uses write_channel_encoded to automatically handle codec metadata and encoding.
     """
+    
     sub = channel.out.sub()
-    write = writer.get_writer(channel.name)
-
-    # Write codec metadata as first record (pickled codec instance)
-    codec_bytes = await asyncio.to_thread(pickle.dumps, channel.codec)
-    write(codec_bytes)
-
-    # Write regular data
-    async for item in sub:
-        data = await asyncio.to_thread(channel.codec.encode, item)
-        write(data)
+    await write_channel_encoded(channel.name, channel.codec, sub, writer)
 
 
 async def run(
@@ -288,7 +278,6 @@ async def run(
 
         # Start playback task if needed
         if playback_channels:
-            from .playback import _playback_task
             tg.create_task(_playback_task(playback_channels, playback_speed))
 
         # Run all nodes
