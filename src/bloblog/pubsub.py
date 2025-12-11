@@ -30,14 +30,16 @@ class Out[T]:
 
     async def publish(self, data: T) -> None:
         """Publish data to all subscribers."""
-        await asyncio.gather(*[sub._queue.put(data) for sub in self.subscribers])
+        for sub in self.subscribers:
+            await sub._queue.put(data)
 
     async def close(self) -> None:
         """Signal all subscribers that the stream has ended.
 
         Called by framework, not by nodes.
         """
-        await asyncio.gather(*[sub._queue.put(_CLOSED) for sub in self.subscribers])
+        for sub in self.subscribers:
+            await sub._queue.put(_CLOSED)
 
 
 class In[T]:

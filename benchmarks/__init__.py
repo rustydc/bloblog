@@ -1,0 +1,2 @@
+"""Initialize benchmarks package."""
+
