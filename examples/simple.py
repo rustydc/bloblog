@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Annotated
 
-from bloblog import In, Out, enable_pickle_codec, playback, run
+from bloblog import In, Out, enable_pickle_codec, run
 
 
 # Example 1: Simple function node
@@ -90,10 +90,10 @@ async def main():
 
         print("\n\nExample 3: Playback")
 
-        await playback([consumer2], playback_dir=log_path)
+        await run([consumer2], playback_dir=log_path)
 
         print("\n\nExample 4: Playback (4.0x)")
-        await playback([consumer2], playback_dir=log_path, speed=4.0)
+        await run([consumer2], playback_dir=log_path, playback_speed=4.0)
 
         print("Done!")
         print(f"Logs stored in: {log_path}")

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from bloblog.bloblog import BlobLogReader, BlobLogWriter, read_channel
+from bloblog.bloblog import BlobLogWriter, amerge, read_channel
 
 
 class TestReaderPerformance:
@@ -199,20 +199,15 @@ class TestReaderPerformance:
 
     @pytest.mark.benchmark(group="reader-callbacks")
     def test_reader_with_callbacks(self, benchmark, small_log_file):
-        """Benchmark BlobLogReader with callbacks."""
+        """Benchmark read_channel directly."""
 
-        async def read_with_reader():
-            reader = BlobLogReader()
+        async def read_with_channel():
             results = []
-
-            async def callback(_time, data):
+            async for _time, data in read_channel(small_log_file):
                 results.append(bytes(data))
-
-            reader.handle(small_log_file, callback)
-            await reader.process(speed=0)
             return results
 
-        result = benchmark(lambda: asyncio.run(read_with_reader()))
+        result = benchmark(lambda: asyncio.run(read_with_channel()))
         assert len(result) == 10_000
 
     @pytest.mark.benchmark(group="amerge")
@@ -220,17 +215,15 @@ class TestReaderPerformance:
         """Benchmark amerge with multiple channels."""
 
         async def merge_channels():
-            reader = BlobLogReader()
             count = 0
-
-            async def callback(_time, _data):
-                nonlocal count
+            readers = [
+                read_channel(multi_channel_logs / f"channel_{i}.bloblog")
+                for i in range(5)
+            ]
+            
+            async for _idx, _time, _data in amerge(*readers):
                 count += 1
-
-            for i in range(5):
-                reader.handle(multi_channel_logs / f"channel_{i}.bloblog", callback)
-
-            await reader.process(speed=0)
+            
             return count
 
         result = benchmark(lambda: asyncio.run(merge_channels()))

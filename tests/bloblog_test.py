@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from bloblog.bloblog import HEADER_STRUCT, BlobLogReader, BlobLogWriter, amerge
+from bloblog.bloblog import HEADER_STRUCT, BlobLogWriter, amerge, read_channel
 
 
 class TestBlobLogWriter:
@@ -80,7 +80,7 @@ class TestBlobLogWriter:
         await writer.close()
 
 
-class TestBlobLogReader:
+class TestReadChannel:
     @pytest.mark.asyncio
     async def test_read_single_blob(self, tmp_path: Path):
         log_file = tmp_path / "test.bloblog"
@@ -93,13 +93,8 @@ class TestBlobLogReader:
 
         # Read it back
         results: list[tuple[int, bytes]] = []
-
-        async def callback(time: int, data: bytes) -> None:
+        async for time, data in read_channel(log_file):
             results.append((time, bytes(data)))  # copy memoryview to bytes
-
-        reader = BlobLogReader()
-        reader.handle(log_file, callback)
-        await reader.process()
 
         assert len(results) == 1
         assert results[0][1] == b"hello"
@@ -121,13 +116,8 @@ class TestBlobLogReader:
 
         # Read it back
         results: list[bytes] = []
-
-        async def callback(_time: int, data: bytes) -> None:
+        async for _time, data in read_channel(log_file):
             results.append(bytes(data))
-
-        reader = BlobLogReader()
-        reader.handle(log_file, callback)
-        await reader.process()
 
         assert results == [b"first", b"second", b"third"]
 
@@ -153,46 +143,17 @@ class TestBlobLogReader:
         write2(b"c2-second")
         await writer.close()
 
-        # Read both channels merged
+        # Read both channels merged using amerge
         results: list[bytes] = []
-
-        async def callback(_time: int, data: bytes) -> None:
+        reader1 = read_channel(log_file1)
+        reader2 = read_channel(log_file2)
+        
+        async for _idx, _time, data in amerge(reader1, reader2):
             results.append(bytes(data))
-
-        reader = BlobLogReader()
-        reader.handle(log_file1, callback)
-        reader.handle(log_file2, callback)
-        await reader.process()
 
         # All 4 items should be present
         assert len(results) == 4
         assert set(results) == {b"c1-first", b"c1-second", b"c2-first", b"c2-second"}
-
-    @pytest.mark.asyncio
-    async def test_multiple_callbacks_per_channel(self, tmp_path: Path):
-        log_file = tmp_path / "test.bloblog"
-
-        writer = BlobLogWriter(tmp_path)
-        write = writer.get_writer("test")
-        write(b"data")
-        await writer.close()
-
-        results1: list[bytes] = []
-        results2: list[bytes] = []
-
-        async def callback1(_time: int, data: bytes) -> None:
-            results1.append(bytes(data))
-
-        async def callback2(_time: int, data: bytes) -> None:
-            results2.append(bytes(data))
-
-        reader = BlobLogReader()
-        reader.handle(log_file, callback1)
-        reader.handle(log_file, callback2)
-        await reader.process()
-
-        assert results1 == [b"data"]
-        assert results2 == [b"data"]
 
 
 class TestAmerge:
@@ -252,13 +213,8 @@ class TestRoundTrip:
         await writer.close()
 
         results: list[bytes] = []
-
-        async def callback(_time: int, data: bytes) -> None:
+        async for _time, data in read_channel(log_file):
             results.append(bytes(data))
-
-        reader = BlobLogReader()
-        reader.handle(log_file, callback)
-        await reader.process()
 
         assert len(results) == 1
         assert results[0] == large_blob
@@ -275,13 +231,8 @@ class TestRoundTrip:
         await writer.close()
 
         results: list[bytes] = []
-
-        async def callback(_time: int, data: bytes) -> None:
+        async for _time, data in read_channel(log_file):
             results.append(bytes(data))
-
-        reader = BlobLogReader()
-        reader.handle(log_file, callback)
-        await reader.process()
 
         assert len(results) == count
         for i, data in enumerate(results):

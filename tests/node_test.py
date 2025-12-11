@@ -11,7 +11,7 @@ from bloblog import run, validate_nodes
 class TestValidateNodes:
     def test_valid_simple_pipeline(self):
         producer = make_producer_node("producer", ["msg"])
-        consumer, _ = make_consumer_node("consumer", "producer_output", 1)
+        consumer, _ = make_consumer_node("producer_output", 1)
 
         # Should not raise
         validate_nodes([producer, consumer])
@@ -24,7 +24,7 @@ class TestValidateNodes:
             validate_nodes([producer1, producer2])
 
     def test_missing_input_producer_raises(self):
-        consumer, _ = make_consumer_node("consumer", "nonexistent_channel", 1)
+        consumer, _ = make_consumer_node("nonexistent_channel", 1)
 
         with pytest.raises(ValueError, match="has no producer node"):
             validate_nodes([consumer])
@@ -42,7 +42,7 @@ class TestRunNodes:
         """Test a simple producer -> consumer pipeline."""
         messages = ["hello", "world", "test"]
         producer = make_producer_node("producer", messages)
-        consumer, received = make_consumer_node("consumer", "producer_output", len(messages))
+        consumer, received = make_consumer_node("producer_output", len(messages))
 
         await run([producer, consumer])
 
@@ -53,8 +53,8 @@ class TestRunNodes:
         """Test one producer with multiple consumers (fan-out)."""
         messages = ["a", "b", "c"]
         producer = make_producer_node("producer", messages)
-        consumer1, received1 = make_consumer_node("consumer1", "producer_output", len(messages))
-        consumer2, received2 = make_consumer_node("consumer2", "producer_output", len(messages))
+        consumer1, received1 = make_consumer_node("producer_output", len(messages))
+        consumer2, received2 = make_consumer_node("producer_output", len(messages))
 
         await run([producer, consumer1, consumer2])
 
@@ -72,7 +72,7 @@ class TestRunNodes:
             lambda s: s.upper(),
             len(messages),
         )
-        consumer, received = make_consumer_node("consumer", "transformer_output", len(messages))
+        consumer, received = make_consumer_node("transformer_output", len(messages))
 
         await run([producer, transformer, consumer])
 
@@ -83,7 +83,7 @@ class TestRunNodes:
         """Test pipeline with empty message list completes the producer."""
         messages = ["single"]
         producer = make_producer_node("producer", messages)
-        consumer, received = make_consumer_node("consumer", "producer_output", len(messages))
+        consumer, received = make_consumer_node("producer_output", len(messages))
 
         # Should complete without hanging
         async with asyncio.timeout(1.0):
@@ -104,7 +104,7 @@ class TestRunNodes:
     @pytest.mark.asyncio
     async def test_validation_error_propagates(self):
         """Test that validation errors are raised from run_nodes."""
-        consumer, _ = make_consumer_node("consumer", "nonexistent_channel", 1)
+        consumer, _ = make_consumer_node("nonexistent_channel", 1)
 
-        with pytest.raises(ValueError, match="has no producer node"):
+        with pytest.raises(ValueError, match="no producer nodes and no playback"):
             await run([consumer])

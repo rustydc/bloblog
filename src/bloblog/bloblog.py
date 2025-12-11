@@ -90,49 +90,6 @@ class BlobLogWriter:
         self.tasks.clear()
 
 
-class BlobLogReader:
-    def __init__(self):
-        self.handlers: dict[Path, list[Callable[[int, memoryview], Awaitable[None]]]] = defaultdict(
-            list
-        )
-
-    def handle(
-        self, channel: str | Path, callback: Callable[[int, memoryview], Awaitable[None]]
-    ) -> None:
-        self.handlers[Path(channel)].append(callback)
-
-    async def process(self, speed: float = 0) -> None:
-        """Process all registered channels.
-
-        Args:
-            speed: Playback speed multiplier. 0 for as-fast-as-possible,
-                   1.0 for realtime, 2.0 for double speed, 0.5 for half speed, etc.
-        """
-        paths = list(self.handlers.keys())
-        readers = [read_channel(path) for path in paths]
-
-        first_log_time: int | None = None
-        start_wall_time: int | None = None
-
-        async for idx, time, data in amerge(*readers):
-            if speed:
-                if first_log_time is None:
-                    first_log_time = time
-                    start_wall_time = time_ns()
-                else:
-                    # Calculate how long to wait, adjusted for speed
-                    assert start_wall_time is not None
-                    log_delta = time - first_log_time
-                    wall_delta = time_ns() - start_wall_time
-                    wait_ns = (log_delta / speed) - wall_delta
-                    if wait_ns > 0:
-                        await asyncio.sleep(wait_ns / 1_000_000_000)
-
-            # Run callbacks for the channel that produced this data
-            for callback in self.handlers[paths[idx]]:
-                await callback(time, data)
-
-
 def _close_mmap(mv: memoryview, mm: mmap.mmap, f: BinaryIO) -> None:
     """Weak reference callback to close mmap resources."""
     mv.release()
