@@ -34,11 +34,11 @@ bench:
 
 bench-save:
 	uv sync --group bench
-	uv run pytest benchmarks/ --benchmark-only --benchmark-save=baseline
+	uv run pytest -o testpaths=benchmarks benchmarks/ --benchmark-only --benchmark-save=baseline
 
 bench-compare:
 	uv sync --group bench
-	uv run pytest benchmarks/ --benchmark-only --benchmark-compare=baseline
+	uv run pytest -o testpaths=benchmarks benchmarks/ --benchmark-only --benchmark-compare=baseline
 
 clean:
 	rm -rf __pycache__ .pytest_cache .ruff_cache .mypy_cache
