@@ -1,93 +1,224 @@
 # Tinman
 
-**Write simple async coroutines. Get automatic pub/sub orchestration, logging, and replay.**
+**A minimal async framework for building data pipelines with logging and playback.**
 
-Tinman is an async-first framework that wires together your coroutines into data pipelines. You write simple `async` functions with annotated channel parameters, and Tinman handles the rest:
+Tinman is built from four composable modules:
 
-- **Automatic wiring** - Pub/sub connections inferred from type annotations
-- **Concurrent orchestration** - All nodes run concurrently, data flows asynchronously  
-- **Zero-config logging** - Every channel automatically logged to efficient binary format, with optional custom encodings
-- **Instant replay** - Trivially re-run any subset of nodes against recorded data
-
-Stop writing pub/sub boilerplate and event loops; just write your async logic, annotate your channels, and let Tinman orchestrate everything.
+1. **BlobLog** - Fast binary logging (timestamp + raw bytes)
+2. **ObLog** - Object logging with codecs (builds on BlobLog)
+3. **PubSub** - Simple async pub/sub channels  
+4. **Runner** - Autowired coroutines with logging and playback (uses all of the above)
 
 ## Installation
 
 ```bash
-pip install tinman
+# Python 3.12+
+git clone https://github.com/rustydc/tinman.git
+cd tinman
+pip install -e .
 ```
 
-Requires Python 3.12+
-
-## Quick Example: Robotic Vacuum
-
-Here's a simple robotic vacuum showing the wiring of nodes for sensor fusion, decision making, and motor control:
+## Quick Start
 
 ```python
-import asyncio
 from typing import Annotated
+from tinman import In, Out, run
 
-from tinman import In, Out, enable_pickle_codec, playback, run
+async def producer(out: Annotated[Out[str], "messages"]):
+    for i in range(10):
+        await out.publish(f"message {i}")
 
-async def sensor_node(sensor_out: Annotated[Out[SensorData], "sensors"]):
-    for _ in range(50):  # Run for 5 seconds at 10Hz
-        data = read_sensors()
-        await sensor_out.publish(data)
-        await asyncio.sleep(0.1)
+async def consumer(inp: Annotated[In[str], "messages"]):
+    async for msg in inp:
+        print(f"Got: {msg}")
 
-async def perception_node(
-    sensor_in: Annotated[In[SensorData], "sensors"],
-    world_out: Annotated[Out[WorldState], "world_state"]
-):
-    position = [0.0, 0.0]
-    async for sensors in sensor_in:
-        position[1] += 2.0  # Move forward 2cm per tick
-        await world_out.publish(
-            WorldState(
-                obstacle_ahead=(sensors.lidar_distance < 30),
-                low_battery=sensors.battery_level < 25,
-                position=(position[0], position[1])
-            )
-        )
-
-async def planner_node(
-    world_in: Annotated[In[WorldState], "world_state"],
-    command_out: Annotated[Out[Command], "commands"]
-):
-    planner = Planner()
-    async for world in world_in:
-        cmd = planner.get_command(world)
-        if cmd:
-            await command_out.publish(cmd)
-
-async def motor_node(command_in: Annotated[In[Command], "commands"]):
-    """Execute motor commands"""
-    async for cmd in command_in:
-        send_motor_commands(cmd)
-
-
-async def main():
-    # Simpler serialization for trusted log streams.
-    enable_default_pickle_codec()
-    
-    # Run the full pipeline.
-    await run(
-        [sensor_node, perception_node, planner_node, motor_node],
-        log_dir=Path("vacuum_logs")
-    )
-    
-    # Run a different planner, and motor, using the above perception output.
-    await playback(
-        [aggressive_planner, motor_node],
-        playback_dir=Path("vacuum_logs")
-    )
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+await run([producer, consumer])
 ```
 
-**What's happening:**
-* **Sensors** → **Perception** → **Planner** → **Motors** pipeline
-* First run: logs all channels (`sensors`, `world_state`, `commands`) 
-* Second run: replays `world_state` from log, tests new planner with identical perception data
+---
+
+## Components
+
+### 1. BlobLog - Binary Logging
+
+Fast, simple binary log format: `(timestamp_ns: u64, length: u64, data: bytes)`.
+
+```python
+from pathlib import Path
+from tinman.bloblog import BlobLogWriter, read_channel
+
+# Write
+writer = BlobLogWriter(Path("logs"))
+write = writer.get_writer("sensor_data")
+write(b"raw bytes")  # Timestamp added automatically
+await writer.close()
+
+# Read
+async for timestamp, data in read_channel(Path("logs/sensor_data.blog")):
+    print(f"{timestamp}: {len(data)} bytes")
+```
+
+**Key features:**
+- Zero-copy memory-mapped reads
+- Batched writes with `writev()`
+- Timestamp-ordered merge of multiple logs
+- ~150 lines, no dependencies
+
+---
+
+### 2. ObLog - Object Logging
+
+Adds codec system on top of BlobLog for automatic encoding/decoding of messages.
+
+```python
+from tinman.oblog import Codec, read_channel_decoded, write_channel_encoded
+from PIL import Image
+import io
+
+class ImageCodec(Codec[Image.Image]):
+    def __init__(self, format: str = "PNG"):
+        self.format = format  # PNG, BMP, TIFF, etc.
+    
+    def encode(self, item: Image.Image) -> bytes:
+        buf = io.BytesIO()
+        item.save(buf, format=self.format)
+        return buf.getvalue()
+    
+    def decode(self, data: Buffer) -> Image.Image:
+        return Image.open(io.BytesIO(bytes(data)))
+
+# Write: codec metadata stored as first record (pickled codec instance with params)
+await write_channel_encoded("/camera", ImageCodec(format="PNG"), input_stream, writer)
+
+# Read: codec auto-detected and unpickled from first record (knows it's PNG)
+# Only allowed if caller has already imported ImageCodec.
+async for timestamp, img in read_channel_decoded(Path("logs/camera.blog")):
+    print(img.size)  # Already decoded PIL Image
+```
+
+**Codec header format:**
+- First record in log file contains pickled codec instance
+- Subsequent records are encoded using that codec
+- On read, codec is unpickled (with security restrictions) and used to decode remaining records
+- Makes log files self-describing
+
+**PickleCodec for prototyping:**
+```python
+from tinman import enable_pickle_codec
+
+# PickleCodec not registered by default (security risk)
+enable_pickle_codec()  # Now you can use it
+
+# Without explicit codec, outputs use PickleCodec by default
+async def producer(out: Annotated[Out[dict], "data"]):
+    await out.publish({"any": "object"})  # Works with PickleCodec
+```
+
+**Key features:**
+- Self-describing log files (codec in first record)
+- Codec registry with auto-registration
+- Safe unpickling with allowlist (only registered codecs)
+- Optional `PickleCodec` for prototyping (must be explicitly enabled)
+- ~200 lines
+
+---
+
+### 3. PubSub - Async Channels
+
+Simple async pub/sub with backpressure.
+
+```python
+from tinman.pubsub import Out, In
+
+out = Out[str]()
+in1 = out.sub()
+in2 = out.sub()
+
+await out.publish("hello")  # Broadcasts to all subscribers
+
+async for msg in in1:
+    print(msg)
+```
+
+**Key features:**
+- Generic types: `Out[T]` and `In[T]`
+- Automatic close propagation
+- Bounded queues for backpressure (default: 10)
+- ~60 lines
+
+---
+
+### 4. Runner - Autowired Coroutines
+
+Wires async functions together using type annotations, with automatic logging and playback.
+
+```python
+from typing import Annotated
+from pathlib import Path
+from tinman import In, Out, run, enable_pickle_codec
+
+# Use pickle for prototyping (trusted data only)
+enable_pickle_codec()
+
+async def sensors(out: Annotated[Out[dict], "raw_sensors"]):
+    """Read sensor data at 10Hz"""
+    for i in range(50):
+        await out.publish({"lidar": 30 + i, "battery": 100 - i})
+        await asyncio.sleep(0.1)
+
+async def perception(
+    inp: Annotated[In[dict], "raw_sensors"],
+    out: Annotated[Out[dict], "world_state"]
+):
+    """Process sensors into world state"""
+    async for sensors in inp:
+        await out.publish({
+            "obstacle": sensors["lidar"] < 30,
+            "low_battery": sensors["battery"] < 25
+        })
+
+async def planner(
+    inp: Annotated[In[dict], "world_state"],
+    out: Annotated[Out[str], "commands"]
+):
+    """Make decisions"""
+    async for world in inp:
+        if world["obstacle"]:
+            await out.publish("STOP")
+        elif world["low_battery"]:
+            await out.publish("DOCK")
+        else:
+            await out.publish("FORWARD")
+
+# First run: full pipeline with logging
+await run([sensors, perception, planner], log_dir=Path("logs"))
+
+# Second run: test new planner with recorded sensor data
+async def aggressive_planner(
+    inp: Annotated[In[dict], "world_state"],
+    out: Annotated[Out[str], "commands"]
+):
+    """Alternate decision logic"""
+    async for world in inp:
+        await out.publish("YOLO" if not world["obstacle"] else "STOP")
+
+await run([aggressive_planner], playback_dir=Path("logs"))
+# This replays world_state from logs, runs new planner
+# No need to re-run sensors or perception
+
+# Optional: control playback speed
+await run([aggressive_planner], playback_dir=Path("logs"), playback_speed=1.0)
+# speed=0 (default): as fast as possible
+# speed=1.0: realtime (respects original timestamps)
+# speed=2.0: double speed
+# speed=0.5: half speed
+```
+
+**Key features:**
+- Automatic channel wiring from annotations
+- Concurrent node execution
+- Optional logging to all output channels
+- Playback mode for testing/development
+- Playback speed control (0=fast, 1.0=realtime, 2.0=2x, etc.)
+- Validation (no duplicate outputs, all inputs have sources)
+- ~350 lines
