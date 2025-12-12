@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from bloblog.pubsub import In, Out
+from tinman.pubsub import In, Out
 
 
 class TestPubSubMicroBenchmarks:

@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-from bloblog.bloblog import BlobLogWriter
+from tinman.bloblog import BlobLogWriter
 
 
 class TestWriterPerformance:

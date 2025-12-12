@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from bloblog.pubsub import In, Out
+from tinman.pubsub import In, Out
 
 
 class SequentialOut:
@@ -23,7 +23,7 @@ class SequentialOut:
             await sub._queue.put(data)
 
     async def close(self) -> None:
-        from bloblog.pubsub import _CLOSED
+        from tinman.pubsub import _CLOSED
         for sub in self.subscribers:
             await sub._queue.put(_CLOSED)
 
@@ -43,7 +43,7 @@ class ConcurrentOut:
         await asyncio.gather(*(sub._queue.put(data) for sub in self.subscribers))
 
     async def close(self) -> None:
-        from bloblog.pubsub import _CLOSED
+        from tinman.pubsub import _CLOSED
         await asyncio.gather(*(sub._queue.put(_CLOSED) for sub in self.subscribers))
 
 

@@ -1,11 +1,11 @@
-"""Tests for default PickleCodec functionality."""
+"""Tests for oblog module (codecs and encoded readers/writers)."""
 
 from typing import Annotated
 
 import pytest
 
-from bloblog import In, Out, run
-from bloblog.codecs import PickleCodec
+from tinman import In, Out, run
+from tinman.oblog import PickleCodec
 
 
 class TestDefaultCodec:
@@ -85,7 +85,7 @@ class TestDefaultCodec:
         """Test that explicit and default codecs can coexist."""
         from collections.abc import Buffer
 
-        from bloblog import Codec
+        from tinman import Codec
 
         class CustomCodec(Codec[str]):
             def encode(self, item: str) -> bytes:

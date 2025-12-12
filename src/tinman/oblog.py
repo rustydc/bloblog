@@ -1,11 +1,20 @@
-"""Codec system for encoding/decoding channel data in tinman."""
+"""Object log format - codec system and encoded readers/writers for tinman.
+
+This module provides:
+- Codec system for encoding/decoding channel data
+- High-level encoded readers/writers that handle codec metadata automatically
+"""
 
 from __future__ import annotations
 
+import asyncio
 import io
 import pickle
 from abc import ABC, abstractmethod
-from collections.abc import Buffer
+from collections.abc import AsyncGenerator, Buffer
+from pathlib import Path
+
+from .bloblog import BlobLogWriter, read_channel
 
 # Global codec registry - populated automatically when Codec subclasses are defined
 _CODEC_REGISTRY: dict[str, type[Codec]] = {}
@@ -133,3 +142,59 @@ def enable_pickle_codec() -> None:
     """
     qualified_name = PickleCodec.get_qualified_name()
     _CODEC_REGISTRY[qualified_name] = PickleCodec
+
+
+async def read_channel_decoded(
+    path: Path,
+) -> AsyncGenerator[tuple[int, object], None]:
+    """Read a channel, auto-detecting codec and yielding decoded objects.
+    
+    The first record in the log file contains the codec metadata. This function
+    reads that, extracts the codec, then yields all subsequent records as
+    (timestamp, decoded_object) tuples.
+    
+    Args:
+        path: Path to the .blog file.
+        
+    Yields:
+        (timestamp, decoded_object) tuples
+    """
+    reader = read_channel(path)
+    
+    # Get first record (codec metadata)
+    _first_time, codec_data = await anext(reader)
+    codec = safe_unpickle_codec(bytes(codec_data))
+    
+    # Yield remaining records as decoded objects
+    async for time, data in reader:
+        item = codec.decode(data)
+        yield time, item
+
+
+async def write_channel_encoded(
+    channel_name: str,
+    codec: Codec,
+    input_stream,  # In[T] from pubsub
+    writer: BlobLogWriter,
+) -> None:
+    """Subscribe to a channel and write encoded objects to a tinman blob file.
+    
+    Automatically writes codec metadata as the first record, then encodes
+    and writes all objects from the input stream. This mirrors read_channel_decoded().
+    
+    Args:
+        channel_name: Name of the channel to write.
+        codec: Codec to use for encoding objects.
+        input_stream: Input stream to read objects from.
+        writer: BlobLogWriter instance to write to.
+    """
+    write = writer.get_writer(channel_name)
+    
+    # Write codec metadata as first record (pickled codec instance)
+    codec_bytes = await asyncio.to_thread(pickle.dumps, codec)
+    write(codec_bytes)
+    
+    # Write encoded objects
+    async for item in input_stream:
+        data = await asyncio.to_thread(codec.encode, item)
+        write(data)

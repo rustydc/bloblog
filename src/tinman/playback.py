@@ -3,70 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import pickle
-from collections.abc import AsyncGenerator, Buffer, Callable
 from pathlib import Path
 from time import time_ns
 
-from .bloblog import BlobLogWriter, amerge, read_channel
-from .codecs import Codec, safe_unpickle_codec
-from .pubsub import In, Out
-
-
-async def read_channel_decoded(
-    path: Path,
-) -> AsyncGenerator[tuple[int, object], None]:
-    """Read a channel, auto-detecting codec and yielding decoded objects.
-    
-    The first record in the log file contains the codec metadata. This function
-    reads that, extracts the codec, then yields all subsequent records as
-    (timestamp, decoded_object) tuples.
-    
-    Args:
-        path: Path to the .blog file.
-        
-    Yields:
-        (timestamp, decoded_object) tuples
-    """
-    reader = read_channel(path)
-    
-    # Get first record (codec metadata)
-    _first_time, codec_data = await anext(reader)
-    codec = safe_unpickle_codec(bytes(codec_data))
-    
-    # Yield remaining records as decoded objects
-    async for time, data in reader:
-        item = codec.decode(data)
-        yield time, item
-
-
-async def write_channel_encoded(
-    channel_name: str,
-    codec: Codec,
-    input_stream: In,
-    writer: BlobLogWriter,
-) -> None:
-    """Subscribe to a channel and write encoded objects to a tinman blob file.
-    
-    Automatically writes codec metadata as the first record, then encodes
-    and writes all objects from the input stream. This mirrors read_channel_decoded().
-    
-    Args:
-        channel_name: Name of the channel to write.
-        codec: Codec to use for encoding objects.
-        input_stream: Input stream to read objects from.
-        writer: BlobLogWriter instance to write to.
-    """
-    write = writer.get_writer(channel_name)
-    
-    # Write codec metadata as first record (pickled codec instance)
-    codec_bytes = await asyncio.to_thread(pickle.dumps, codec)
-    write(codec_bytes)
-    
-    # Write encoded objects
-    async for item in input_stream:
-        data = await asyncio.to_thread(codec.encode, item)
-        write(data)
+from .bloblog import amerge
+from .oblog import read_channel_decoded
+from .pubsub import Out
 
 
 async def _playback_task(

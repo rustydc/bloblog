@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from bloblog.pubsub import In, Out
+from tinman.pubsub import In, Out
 
 
 class OptimizedOut:
@@ -24,7 +24,7 @@ class OptimizedOut:
             await sub._queue.put(data)
 
     async def close(self) -> None:
-        from bloblog.pubsub import _CLOSED
+        from tinman.pubsub import _CLOSED
 
         for sub in self.subscribers:
             await sub._queue.put(_CLOSED)
@@ -46,7 +46,7 @@ class OptimizedOutGenerator:
         await asyncio.gather(*(sub._queue.put(data) for sub in self.subscribers))
 
     async def close(self) -> None:
-        from bloblog.pubsub import _CLOSED
+        from tinman.pubsub import _CLOSED
 
         await asyncio.gather(*(sub._queue.put(_CLOSED) for sub in self.subscribers))
 
@@ -69,7 +69,7 @@ class OptimizedOutNoGather:
             await task
 
     async def close(self) -> None:
-        from bloblog.pubsub import _CLOSED
+        from tinman.pubsub import _CLOSED
 
         tasks = [asyncio.create_task(sub._queue.put(_CLOSED)) for sub in self.subscribers]
         for task in tasks:

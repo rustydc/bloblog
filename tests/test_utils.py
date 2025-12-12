@@ -3,7 +3,7 @@
 from collections.abc import Awaitable, Buffer, Callable
 from typing import Annotated
 
-from bloblog import Codec, In, Out
+from tinman import Codec, In, Out
 
 
 class StringCodec(Codec[str]):

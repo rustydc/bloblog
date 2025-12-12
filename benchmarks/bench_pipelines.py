@@ -7,8 +7,8 @@ from typing import Annotated
 
 import pytest
 
-from bloblog import In, Out, run
-from bloblog.codecs import Codec
+from tinman import In, Out, run
+from tinman.oblog import Codec
 
 
 class SimpleCodec(Codec[str]):

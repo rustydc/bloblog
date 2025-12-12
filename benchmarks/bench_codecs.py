@@ -5,7 +5,7 @@ from collections.abc import Buffer
 
 import pytest
 
-from bloblog.codecs import Codec, PickleCodec
+from tinman.oblog import Codec, PickleCodec
 
 
 class SimpleStringCodec(Codec[str]):

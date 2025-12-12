@@ -5,7 +5,7 @@ import asyncio
 import pytest
 from test_utils import make_consumer_node, make_producer_node, make_transform_node
 
-from bloblog import run, validate_nodes
+from tinman import run, validate_nodes
 
 
 class TestValidateNodes:

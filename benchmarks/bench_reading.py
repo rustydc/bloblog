@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from bloblog.bloblog import BlobLogWriter, amerge, read_channel
+from tinman.bloblog import BlobLogWriter, amerge, read_channel
 
 
 class TestReaderPerformance:
