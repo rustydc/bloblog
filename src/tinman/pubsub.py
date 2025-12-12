@@ -22,9 +22,13 @@ class Out[T]:
     def __init__(self) -> None:
         self.subscribers: list[In[T]] = []
 
-    def sub(self) -> "In[T]":
-        """Create a subscriber (used internally by framework)."""
-        sub: In[T] = In()
+    def sub(self, maxsize: int = 10) -> "In[T]":
+        """Create a subscriber (used internally by framework).
+        
+        Args:
+            maxsize: Maximum queue size for backpressure (default: 10).
+        """
+        sub: In[T] = In(maxsize=maxsize)
         self.subscribers.append(sub)
         return sub
 
@@ -48,8 +52,13 @@ class In[T]:
     Nodes iterate over inputs to receive data.
     """
 
-    def __init__(self) -> None:
-        self._queue: asyncio.Queue[T | _Closed] = asyncio.Queue(10)
+    def __init__(self, maxsize: int = 10) -> None:
+        """Initialize input channel with bounded queue.
+        
+        Args:
+            maxsize: Maximum queue size for backpressure (default: 10).
+        """
+        self._queue: asyncio.Queue[T | _Closed] = asyncio.Queue(maxsize)
         self._closed = False
 
     def __aiter__(self) -> "In[T]":

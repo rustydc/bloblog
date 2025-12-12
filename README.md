@@ -149,14 +149,22 @@ async for msg in in1:
 **Key features:**
 - Generic types: `Out[T]` and `In[T]`
 - Automatic close propagation
-- Bounded queues for backpressure (default: 10)
-- ~60 lines
+- Bounded queues for backpressure (configurable, default: 10)
+- ~70 lines
+
+**Configurable queue sizes:**
+```python
+# Large queue to buffer bursts
+async def bursty_consumer(inp: Annotated[In[str], "messages", 100]):
+    async for msg in inp:
+        quick_operation(msg)
+```
 
 ---
 
 ### 4. Runner - Autowired Coroutines
 
-Wires async functions together using type annotations, with automatic logging and playback.
+Wires async functions together with PubSub using type annotations, with automatic ObLog logging and playback.
 
 ```python
 from typing import Annotated

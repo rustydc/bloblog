@@ -25,7 +25,7 @@ class _ChannelRuntime[T]:
 
 def _parse_node_signature(
     node_fn: Callable,
-) -> tuple[dict[str, str], dict[str, tuple[str, Codec]]]:
+) -> tuple[dict[str, tuple[str, int]], dict[str, tuple[str, Codec]]]:
     """Parse a node function's signature to extract input/output channels.
 
     Args:
@@ -33,7 +33,7 @@ def _parse_node_signature(
 
     Returns:
         (inputs, outputs) where:
-        - inputs maps param_name -> channel_name (no codec)
+        - inputs maps param_name -> (channel_name, queue_size)
         - outputs maps param_name -> (channel_name, codec)
 
     Raises:
@@ -42,7 +42,7 @@ def _parse_node_signature(
     sig = inspect.signature(node_fn)
     hints = get_type_hints(node_fn, include_extras=True)
 
-    inputs: dict[str, str] = {}
+    inputs: dict[str, tuple[str, int]] = {}
     outputs: dict[str, tuple[str, Codec]] = {}
 
     for param_name, _param in sig.parameters.items():
@@ -75,13 +75,25 @@ def _parse_node_signature(
         origin = get_origin(base_type)
 
         if origin is In:
-            # Inputs must have exactly 2 args (no codec)
-            if len(args) != 2:
+            # Inputs can have 2 args (default queue size) or 3 args (with queue size)
+            queue_size = 10  # default
+            if len(args) == 2:
+                # Annotated[In[T], "channel"]
+                pass
+            elif len(args) == 3:
+                # Annotated[In[T], "channel", queue_size]
+                queue_size = args[2]
+                if not isinstance(queue_size, int) or queue_size <= 0:
+                    raise ValueError(
+                        f"Input parameter '{param_name}' queue size must be a positive integer, "
+                        f"got {queue_size}"
+                    )
+            else:
                 raise ValueError(
                     f"Input parameter '{param_name}' must be Annotated[In[T], \"channel\"] "
-                    f"(codec discovered from output/log)"
+                    f"or Annotated[In[T], \"channel\", queue_size]"
                 )
-            inputs[param_name] = channel_name
+            inputs[param_name] = (channel_name, queue_size)
 
         elif origin is Out:
             # Outputs can have 2 args (use PickleCodec) or 3 args (explicit codec)
@@ -136,7 +148,7 @@ def validate_nodes(
     # Check all inputs have corresponding outputs
     for node_fn in nodes:
         inputs, _ = _parse_node_signature(node_fn)
-        for _param_name, channel_name in inputs.items():
+        for _param_name, (channel_name, _queue_size) in inputs.items():
             if channel_name not in output_channels:
                 raise ValueError(
                     f"Input channel '{channel_name}' in {node_fn.__name__}() has no producer node"
@@ -251,7 +263,7 @@ async def run(
     for node_fn in nodes:
         inputs, outputs = _parse_node_signature(node_fn)
 
-        for _param_name, channel_name in inputs.items():
+        for _param_name, (channel_name, _queue_size) in inputs.items():
             all_inputs.add(channel_name)
 
         for _param_name, (channel_name, _codec) in outputs.items():
@@ -293,7 +305,7 @@ async def run(
     # Pre-build kwargs for all nodes to avoid race conditions
     # All subscriptions must be created BEFORE any node starts running
     for _node_fn, (inputs, outputs, kwargs) in node_info.items():
-        for param_name, channel_name in inputs.items():
+        for param_name, (channel_name, queue_size) in inputs.items():
             # Get the Out from either runtime channels or playback channels
             if channel_name in runtime_channels:
                 out = runtime_channels[channel_name].out
@@ -301,7 +313,7 @@ async def run(
                 _, _, out = playback_channels[channel_name]
             else:
                 raise ValueError(f"No source for input channel '{channel_name}'")
-            kwargs[param_name] = out.sub()
+            kwargs[param_name] = out.sub(maxsize=queue_size)
 
         for param_name, (channel_name, _) in outputs.items():
             kwargs[param_name] = runtime_channels[channel_name].out

@@ -94,13 +94,6 @@ class Codec[T]:
 _CODEC_REGISTRY: dict[str, type[Codec]] = {}
 
 
-def _register_codec(codec_class: type[Codec]) -> type[Codec]:
-    """Decorator to auto-register a codec class."""
-    qualified_name = codec_class.get_qualified_name()
-    _CODEC_REGISTRY[qualified_name] = codec_class
-    return codec_class
-
-
 class _RestrictedUnpickler(pickle.Unpickler):
     """Unpickler that only allows registered Codec classes."""
 
