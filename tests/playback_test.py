@@ -5,7 +5,7 @@ from typing import Annotated
 import pytest
 from test_utils import StringCodec
 
-from bloblog import In, Out, run
+from tinman import In, Out, run
 
 
 class TestPlayback:
@@ -24,7 +24,7 @@ class TestPlayback:
         await run([recording_producer], log_dir=tmp_path)
 
         # Verify log file was created
-        log_file = tmp_path / "producer_output.bloblog"
+        log_file = tmp_path / "producer_output.blog"
         assert log_file.exists()
 
         # Second run: playback producer (implicitly), run consumer live

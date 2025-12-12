@@ -1,4 +1,4 @@
-"""Simple pub-sub implementation for bloblog nodes."""
+"""Simple pub-sub implementation for tinman nodes."""
 
 import asyncio
 

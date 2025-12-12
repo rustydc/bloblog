@@ -1,4 +1,4 @@
-"""Log playback support for bloblog nodes."""
+"""Log playback support for tinman nodes."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ async def read_channel_decoded(
     (timestamp, decoded_object) tuples.
     
     Args:
-        path: Path to the .bloblog file.
+        path: Path to the .blog file.
         
     Yields:
         (timestamp, decoded_object) tuples
@@ -46,7 +46,7 @@ async def write_channel_encoded(
     input_stream: In,
     writer: BlobLogWriter,
 ) -> None:
-    """Subscribe to a channel and write encoded objects to a bloblog file.
+    """Subscribe to a channel and write encoded objects to a tinman blob file.
     
     Automatically writes codec metadata as the first record, then encodes
     and writes all objects from the input stream. This mirrors read_channel_decoded().

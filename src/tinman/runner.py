@@ -1,4 +1,4 @@
-"""Bloblog node graph execution and management."""
+"""Tinman node graph execution and management."""
 
 from __future__ import annotations
 
@@ -144,7 +144,7 @@ def validate_nodes(
 
 
 async def _logging_task(channel: _ChannelRuntime, writer: BlobLogWriter) -> None:
-    """Subscribe to a channel and log all messages to a bloblog file.
+    """Subscribe to a channel and log all messages to a tinman blob file.
 
     Uses write_channel_encoded to automatically handle codec metadata and encoding.
     """
@@ -167,7 +167,7 @@ async def run(
                - Inputs: Annotated[In[T], "channel_name"]
                - Outputs: Annotated[Out[T], "channel_name", codec_instance]
         log_dir: Optional directory to write log files for outputs.
-        playback_dir: Optional directory containing .bloblog files to play back from.
+        playback_dir: Optional directory containing .blog files to play back from.
                       If provided, any input channels not produced by live nodes
                       will be played back from logs.
         playback_speed: Playback speed multiplier. 0 = as fast as possible,
@@ -215,7 +215,7 @@ async def run(
     if playback_dir and missing_inputs:
         # Validate that log files exist for all missing inputs
         for channel_name in missing_inputs:
-            log_path = playback_dir / f"{channel_name}.bloblog"
+            log_path = playback_dir / f"{channel_name}.blog"
             if not log_path.exists():
                 raise FileNotFoundError(
                     f"No log file for channel '{channel_name}': {log_path}"

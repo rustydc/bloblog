@@ -1,4 +1,4 @@
-"""Bloblog binary log format and I/O implementation."""
+"""Tinman binary log format and I/O implementation."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ class BlobLogWriter:
         self.tasks: dict[Path, asyncio.Task] = {}
 
     def get_writer(self, channel: str) -> Callable[[Buffer], None]:
-        path = self.log_dir / f"{channel}.bloblog"
+        path = self.log_dir / f"{channel}.blog"
 
         if path not in self.queues:
             queue: asyncio.Queue[tuple[int, Buffer] | None] = asyncio.Queue()
@@ -98,7 +98,7 @@ def _close_mmap(mv: memoryview, mm: mmap.mmap, f: BinaryIO) -> None:
 
 
 async def read_channel(path: Path) -> AsyncGenerator[tuple[int, memoryview], None]:
-    """Read a bloblog file, yielding (timestamp, data) tuples.
+    """Read a tinman blob file, yielding (timestamp, data) tuples.
 
     The memoryview slices remain valid as long as they are referenced.
     Resources are cleaned up via finalizer when no longer needed.

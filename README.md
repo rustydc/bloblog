@@ -1,20 +1,20 @@
-# Bloblog
+# Tinman
 
 **Write simple async coroutines. Get automatic pub/sub orchestration, logging, and replay.**
 
-Bloblog is an async-first framework that wires together your coroutines into data pipelines. You write simple `async` functions with annotated channel parameters, and Bloblog handles the rest:
+Tinman is an async-first framework that wires together your coroutines into data pipelines. You write simple `async` functions with annotated channel parameters, and Tinman handles the rest:
 
 - **Automatic wiring** - Pub/sub connections inferred from type annotations
 - **Concurrent orchestration** - All nodes run concurrently, data flows asynchronously  
 - **Zero-config logging** - Every channel automatically logged to efficient binary format, with optional custom encodings
 - **Instant replay** - Trivially re-run any subset of nodes against recorded data
 
-Stop writing pub/sub boilerplate and event loops; just write your async logic, annotate your channels, and let Bloblog orchestrate everything.
+Stop writing pub/sub boilerplate and event loops; just write your async logic, annotate your channels, and let Tinman orchestrate everything.
 
 ## Installation
 
 ```bash
-pip install bloblog
+pip install tinman
 ```
 
 Requires Python 3.12+
@@ -27,7 +27,7 @@ Here's a simple robotic vacuum showing the wiring of nodes for sensor fusion, de
 import asyncio
 from typing import Annotated
 
-from bloblog import In, Out, enable_pickle_codec, playback, run
+from tinman import In, Out, enable_pickle_codec, playback, run
 
 async def sensor_node(sensor_out: Annotated[Out[SensorData], "sensors"]):
     for _ in range(50):  # Run for 5 seconds at 10Hz

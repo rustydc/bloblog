@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from bloblog.bloblog import HEADER_STRUCT, BlobLogWriter, amerge, read_channel
+from tinman.bloblog import HEADER_STRUCT, BlobLogWriter, amerge, read_channel
 
 
 class TestBlobLogWriter:
@@ -15,7 +15,7 @@ class TestBlobLogWriter:
         await writer.close()
 
         # Verify file contents
-        log_file = tmp_path / "test.bloblog"
+        log_file = tmp_path / "test.blog"
         data = log_file.read_bytes()
         assert len(data) == 16 + 5  # header + "hello"
         time, length = HEADER_STRUCT.unpack_from(data, 0)
@@ -33,7 +33,7 @@ class TestBlobLogWriter:
         await writer.close()
 
         # Verify file contents
-        log_file = tmp_path / "test.bloblog"
+        log_file = tmp_path / "test.blog"
         data = log_file.read_bytes()
         offset = 0
         expected = [b"one", b"two", b"three"]
@@ -56,8 +56,8 @@ class TestBlobLogWriter:
         await writer.close()
 
         # Verify both files exist and have correct content
-        log_file1 = tmp_path / "channel1.bloblog"
-        log_file2 = tmp_path / "channel2.bloblog"
+        log_file1 = tmp_path / "channel1.blog"
+        log_file2 = tmp_path / "channel2.blog"
         assert log_file1.exists()
         assert log_file2.exists()
 
@@ -83,7 +83,7 @@ class TestBlobLogWriter:
 class TestReadChannel:
     @pytest.mark.asyncio
     async def test_read_single_blob(self, tmp_path: Path):
-        log_file = tmp_path / "test.bloblog"
+        log_file = tmp_path / "test.blog"
 
         # Write test data
         writer = BlobLogWriter(tmp_path)
@@ -102,7 +102,7 @@ class TestReadChannel:
 
     @pytest.mark.asyncio
     async def test_read_multiple_blobs_in_order(self, tmp_path: Path):
-        log_file = tmp_path / "test.bloblog"
+        log_file = tmp_path / "test.blog"
 
         # Write test data with small delays to ensure ordering
         writer = BlobLogWriter(tmp_path)
@@ -123,8 +123,8 @@ class TestReadChannel:
 
     @pytest.mark.asyncio
     async def test_read_multiple_channels_merged_by_time(self, tmp_path: Path):
-        log_file1 = tmp_path / "channel1.bloblog"
-        log_file2 = tmp_path / "channel2.bloblog"
+        log_file1 = tmp_path / "channel1.blog"
+        log_file2 = tmp_path / "channel2.blog"
 
         # Write to channel 1
         writer = BlobLogWriter(tmp_path)
@@ -204,7 +204,7 @@ class TestAmerge:
 class TestRoundTrip:
     @pytest.mark.asyncio
     async def test_large_data(self, tmp_path: Path):
-        log_file = tmp_path / "test.bloblog"
+        log_file = tmp_path / "test.blog"
         large_blob = b"x" * 1_000_000  # 1MB
 
         writer = BlobLogWriter(tmp_path)
@@ -221,7 +221,7 @@ class TestRoundTrip:
 
     @pytest.mark.asyncio
     async def test_many_small_writes(self, tmp_path: Path):
-        log_file = tmp_path / "test.bloblog"
+        log_file = tmp_path / "test.blog"
         count = 1000
 
         writer = BlobLogWriter(tmp_path)

@@ -1,5 +1,5 @@
 [project]
-name = "bloblog"
+name = "tinman"
 version = "0.1.0"
 description = "A blob logging and pub/sub node framework"
 requires-python = ">=3.12"
@@ -22,7 +22,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/bloblog"]
+packages = ["src/tinman"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

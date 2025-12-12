@@ -1,4 +1,4 @@
-"""Codec system for encoding/decoding channel data in bloblog."""
+"""Codec system for encoding/decoding channel data in tinman."""
 
 from __future__ import annotations
 

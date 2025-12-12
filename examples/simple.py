@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Annotated
 
-from bloblog import In, Out, enable_pickle_codec, run
+from tinman import In, Out, enable_pickle_codec, run
 
 
 # Example 1: Simple function node
