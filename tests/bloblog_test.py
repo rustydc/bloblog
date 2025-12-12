@@ -3,13 +3,20 @@ from pathlib import Path
 
 import pytest
 
-from tinman.bloblog import HEADER_STRUCT, BlobLogWriter, amerge, read_channel
+from tinman.bloblog import HEADER_STRUCT, BlobLog, amerge
 
 
-class TestBlobLogWriter:
+def _read_bloblog_channel(log_file_path: Path):
+    """Helper to read a channel from its .blog file path."""
+    channel_name = log_file_path.stem
+    log_dir = log_file_path.parent
+    return BlobLog(log_dir).read_channel(channel_name)
+
+
+class TestBlobLog:
     @pytest.mark.asyncio
     async def test_write_single_blob(self, tmp_path: Path):
-        writer = BlobLogWriter(tmp_path)
+        writer = BlobLog(tmp_path)
         write = writer.get_writer("test")
         write(b"hello")
         await writer.close()
@@ -25,7 +32,7 @@ class TestBlobLogWriter:
 
     @pytest.mark.asyncio
     async def test_write_multiple_blobs(self, tmp_path: Path):
-        writer = BlobLogWriter(tmp_path)
+        writer = BlobLog(tmp_path)
         write = writer.get_writer("test")
         write(b"one")
         write(b"two")
@@ -47,7 +54,7 @@ class TestBlobLogWriter:
 
     @pytest.mark.asyncio
     async def test_write_to_multiple_channels(self, tmp_path: Path):
-        writer = BlobLogWriter(tmp_path)
+        writer = BlobLog(tmp_path)
         write1 = writer.get_writer("channel1")
         write2 = writer.get_writer("channel2")
 
@@ -71,12 +78,12 @@ class TestBlobLogWriter:
 
     @pytest.mark.asyncio
     async def test_get_writer_returns_same_queue_for_same_channel(self, tmp_path: Path):
-        writer = BlobLogWriter(tmp_path)
+        writer = BlobLog(tmp_path)
         _ = writer.get_writer("test")
         _ = writer.get_writer("test")
 
         # Should use the same queue
-        assert len(writer.queues) == 1
+        assert len(writer._queues) == 1
         await writer.close()
 
 
@@ -86,15 +93,17 @@ class TestReadChannel:
         log_file = tmp_path / "test.blog"
 
         # Write test data
-        writer = BlobLogWriter(tmp_path)
+        writer = BlobLog(tmp_path)
         write = writer.get_writer("test")
         write(b"hello")
         await writer.close()
 
         # Read it back
         results: list[tuple[int, bytes]] = []
-        async for time, data in read_channel(log_file):
+        blob = BlobLog(tmp_path)
+        async for time, data in blob.read_channel("test"):
             results.append((time, bytes(data)))  # copy memoryview to bytes
+        await blob.close()
 
         assert len(results) == 1
         assert results[0][1] == b"hello"
@@ -105,7 +114,7 @@ class TestReadChannel:
         log_file = tmp_path / "test.blog"
 
         # Write test data with small delays to ensure ordering
-        writer = BlobLogWriter(tmp_path)
+        writer = BlobLog(tmp_path)
         write = writer.get_writer("test")
         write(b"first")
         await asyncio.sleep(0.001)
@@ -116,7 +125,7 @@ class TestReadChannel:
 
         # Read it back
         results: list[bytes] = []
-        async for _time, data in read_channel(log_file):
+        async for _time, data in _read_bloblog_channel(log_file):
             results.append(bytes(data))
 
         assert results == [b"first", b"second", b"third"]
@@ -127,7 +136,7 @@ class TestReadChannel:
         log_file2 = tmp_path / "channel2.blog"
 
         # Write to channel 1
-        writer = BlobLogWriter(tmp_path)
+        writer = BlobLog(tmp_path)
         write1 = writer.get_writer("channel1")
         write1(b"c1-first")
         await asyncio.sleep(0.002)
@@ -135,7 +144,7 @@ class TestReadChannel:
         await writer.close()
 
         # Write to channel 2 (with timestamps between channel 1's)
-        writer = BlobLogWriter(tmp_path)
+        writer = BlobLog(tmp_path)
         write2 = writer.get_writer("channel2")
         await asyncio.sleep(0.001)
         write2(b"c2-first")
@@ -145,9 +154,9 @@ class TestReadChannel:
 
         # Read both channels merged using amerge
         results: list[bytes] = []
-        reader1 = read_channel(log_file1)
-        reader2 = read_channel(log_file2)
-        
+        reader1 = _read_bloblog_channel(log_file1)
+        reader2 = _read_bloblog_channel(log_file2)
+
         async for _idx, _time, data in amerge(reader1, reader2):
             results.append(bytes(data))
 
@@ -207,13 +216,13 @@ class TestRoundTrip:
         log_file = tmp_path / "test.blog"
         large_blob = b"x" * 1_000_000  # 1MB
 
-        writer = BlobLogWriter(tmp_path)
+        writer = BlobLog(tmp_path)
         write = writer.get_writer("test")
         write(large_blob)
         await writer.close()
 
         results: list[bytes] = []
-        async for _time, data in read_channel(log_file):
+        async for _time, data in _read_bloblog_channel(log_file):
             results.append(bytes(data))
 
         assert len(results) == 1
@@ -224,14 +233,14 @@ class TestRoundTrip:
         log_file = tmp_path / "test.blog"
         count = 1000
 
-        writer = BlobLogWriter(tmp_path)
+        writer = BlobLog(tmp_path)
         write = writer.get_writer("test")
         for i in range(count):
             write(f"item-{i}".encode())
         await writer.close()
 
         results: list[bytes] = []
-        async for _time, data in read_channel(log_file):
+        async for _time, data in _read_bloblog_channel(log_file):
             results.append(bytes(data))
 
         assert len(results) == count

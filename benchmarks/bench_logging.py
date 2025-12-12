@@ -1,4 +1,4 @@
-"""Benchmarks for BlobLogWriter write performance."""
+"""Benchmarks for BlobLog write performance."""
 
 import asyncio
 import os
@@ -7,11 +7,11 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-from tinman.bloblog import BlobLogWriter
+from tinman.bloblog import BlobLog
 
 
 class TestWriterPerformance:
-    """Benchmark BlobLogWriter for various message sizes and patterns."""
+    """Benchmark BlobLog for various message sizes and patterns."""
 
     @pytest.fixture
     def tmp_log_dir(self):
@@ -23,7 +23,7 @@ class TestWriterPerformance:
         """Benchmark writing many small messages (100 bytes)."""
 
         async def write_messages():
-            writer = BlobLogWriter(tmp_log_dir)
+            writer = BlobLog(tmp_log_dir)
             write = writer.get_writer("bench")
 
             for _ in range(1000):
@@ -38,7 +38,7 @@ class TestWriterPerformance:
         """Benchmark writing medium messages (10KB)."""
 
         async def write_messages():
-            writer = BlobLogWriter(tmp_log_dir)
+            writer = BlobLog(tmp_log_dir)
             write = writer.get_writer("bench")
 
             for _ in range(1000):
@@ -53,7 +53,7 @@ class TestWriterPerformance:
         """Benchmark writing large messages (1MB)."""
 
         async def write_messages():
-            writer = BlobLogWriter(tmp_log_dir)
+            writer = BlobLog(tmp_log_dir)
             write = writer.get_writer("bench")
 
             for _ in range(100):
@@ -68,7 +68,7 @@ class TestWriterPerformance:
         """Benchmark writing extra large messages (10MB)."""
 
         async def write_messages():
-            writer = BlobLogWriter(tmp_log_dir)
+            writer = BlobLog(tmp_log_dir)
             write = writer.get_writer("bench")
 
             for _ in range(10):
@@ -83,7 +83,7 @@ class TestWriterPerformance:
         """Benchmark writing very large messages (100MB)."""
 
         async def write_messages():
-            writer = BlobLogWriter(tmp_log_dir)
+            writer = BlobLog(tmp_log_dir)
             write = writer.get_writer("bench")
 
             # Just 2 messages to keep benchmark time reasonable
@@ -99,7 +99,7 @@ class TestWriterPerformance:
         """Benchmark burst writing (tests batching behavior)."""
 
         async def write_burst():
-            writer = BlobLogWriter(tmp_log_dir)
+            writer = BlobLog(tmp_log_dir)
             write = writer.get_writer("bench")
 
             # Write 10000 messages as fast as possible
@@ -115,7 +115,7 @@ class TestWriterPerformance:
         """Benchmark writing to multiple channels concurrently."""
 
         async def write_multi():
-            writer = BlobLogWriter(tmp_log_dir)
+            writer = BlobLog(tmp_log_dir)
             writers = [writer.get_writer(f"channel_{i}") for i in range(10)]
 
             for _ in range(1000):
@@ -132,7 +132,7 @@ class TestWriterPerformance:
 
         async def write_with_writev():
             """Current implementation using writev."""
-            writer = BlobLogWriter(tmp_log_dir)
+            writer = BlobLog(tmp_log_dir)
             write = writer.get_writer("writev_bench")
 
             # Burst writes to trigger batching
@@ -153,7 +153,7 @@ class TestWriterPerformance:
             iov_max = 16
 
         async def write_iov_max():
-            writer = BlobLogWriter(tmp_log_dir)
+            writer = BlobLog(tmp_log_dir)
             write = writer.get_writer("iov_bench")
 
             # Write exactly IOV_MAX * 2 messages to test batching logic

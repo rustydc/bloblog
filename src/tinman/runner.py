@@ -9,8 +9,8 @@ from pathlib import Path
 from time import time_ns
 from typing import Annotated, Any, get_args, get_origin, get_type_hints
 
-from .bloblog import BlobLogWriter, amerge
-from .oblog import Codec, PickleCodec, read_channel_decoded, write_channel_encoded
+from .bloblog import amerge
+from .oblog import Codec, ObLog, PickleCodec
 from .pubsub import In, Out
 
 
@@ -143,24 +143,23 @@ def validate_nodes(
                 )
 
 
-async def _logging_task(channel: _ChannelRuntime, writer: BlobLogWriter) -> None:
-    """Subscribe to a channel and log all messages to a tinman blob file.
-
-    Uses write_channel_encoded to automatically handle codec metadata and encoding.
-    """
-    
+async def _logging_task(channel: _ChannelRuntime, oblog: ObLog) -> None:
+    """Subscribe to a channel and log all messages to an oblog directory."""
     sub = channel.out.sub()
-    await write_channel_encoded(channel.name, channel.codec, sub, writer)
+    write = oblog.get_writer(channel.name, channel.codec)
+
+    async for item in sub:
+        write(item)
 
 
 async def _playback_task(
-    channels: dict[str, tuple[Path, Out]],
+    channels: dict[str, tuple[Path, str, Out]],
     speed: float = 0,
 ) -> None:
     """Read from multiple log files, merge by timestamp, decode and publish.
 
     Args:
-        channels: Map of channel_name -> (log_path, output_channel)
+        channels: Map of channel_name -> (log_dir, channel_name, output_channel)
         speed: Playback speed multiplier. 0 for as-fast-as-possible,
                1.0 for realtime, 2.0 for double speed, 0.5 for half speed, etc.
     """
@@ -169,10 +168,14 @@ async def _playback_task(
 
     # Build mapping from index to channel info
     channel_list = list(channels.items())
-    paths = [path for _name, (path, _out) in channel_list]
-    
-    # Create decoded readers for each channel (handles codec extraction internally)
-    readers = [read_channel_decoded(path) for path in paths]
+
+    # Create ObLog readers for each channel
+    oblogs = []
+    readers = []
+    for channel_name, (log_dir, _channel_name, _out) in channel_list:
+        oblog = ObLog(log_dir)
+        oblogs.append(oblog)
+        readers.append(oblog.read_channel(channel_name))
 
     # Track timing for speed control
     first_log_time: int | None = None
@@ -181,8 +184,8 @@ async def _playback_task(
     try:
         # Merge the decoded records from all channels
         async for idx, time, item in amerge(*readers):
-            channel_name, (_path, out) = channel_list[idx]
-            
+            channel_name, (_log_dir, _channel_name, out) = channel_list[idx]
+
             # Apply speed control
             if speed:
                 if first_log_time is None:
@@ -199,9 +202,11 @@ async def _playback_task(
             # Publish already-decoded item
             await out.publish(item)
     finally:
-        # Close all output channels when playback is done
-        for _name, (_path, out) in channels.items():
+        # Close all output channels and oblogs when playback is done
+        for _name, (_log_dir, _channel_name, out) in channels.items():
             await out.close()
+        for oblog in oblogs:
+            await oblog.close()
 
 
 async def run(
@@ -245,52 +250,46 @@ async def run(
 
     for node_fn in nodes:
         inputs, outputs = _parse_node_signature(node_fn)
-        
+
         for _param_name, channel_name in inputs.items():
             all_inputs.add(channel_name)
-        
+
         for _param_name, (channel_name, _codec) in outputs.items():
             if channel_name in all_outputs:
-                raise ValueError(
-                    f"Output channel '{channel_name}' produced by multiple nodes"
-                )
+                raise ValueError(f"Output channel '{channel_name}' produced by multiple nodes")
             all_outputs.add(channel_name)
-        
+
         node_info[node_fn] = (inputs, outputs, {})
-    
+
     # Find inputs that aren't produced by any node (need playback)
     missing_inputs = all_inputs - all_outputs
-    
+
     # Setup playback if needed
-    playback_channels: dict[str, tuple[Path, Out]] = {}
+    playback_channels: dict[str, tuple[Path, str, Out]] = {}
     if playback_dir and missing_inputs:
         # Validate that log files exist for all missing inputs
         for channel_name in missing_inputs:
             log_path = playback_dir / f"{channel_name}.blog"
             if not log_path.exists():
-                raise FileNotFoundError(
-                    f"No log file for channel '{channel_name}': {log_path}"
-                )
+                raise FileNotFoundError(f"No log file for channel '{channel_name}': {log_path}")
             # Create output channel for playback
             out = Out()
-            playback_channels[channel_name] = (log_path, out)
+            playback_channels[channel_name] = (playback_dir, channel_name, out)
     elif missing_inputs:
         # No playback_dir but have missing inputs - error
-        raise ValueError(
-            f"Input channels have no producer nodes and no playback: {missing_inputs}"
-        )
-    
+        raise ValueError(f"Input channels have no producer nodes and no playback: {missing_inputs}")
+
     # Build runtime channels - includes both live outputs and playback outputs
     runtime_channels: dict[str, _ChannelRuntime] = {}
-    
+
     for node_fn in nodes:
         inputs, outputs, _ = node_info[node_fn]
-        
+
         # Create runtime channels for node outputs
         for _param_name, (channel_name, codec) in outputs.items():
             if channel_name not in runtime_channels:
                 runtime_channels[channel_name] = _ChannelRuntime(channel_name, codec)
-    
+
     # Pre-build kwargs for all nodes to avoid race conditions
     # All subscriptions must be created BEFORE any node starts running
     for _node_fn, (inputs, outputs, kwargs) in node_info.items():
@@ -299,7 +298,7 @@ async def run(
             if channel_name in runtime_channels:
                 out = runtime_channels[channel_name].out
             elif channel_name in playback_channels:
-                _, out = playback_channels[channel_name]
+                _, _, out = playback_channels[channel_name]
             else:
                 raise ValueError(f"No source for input channel '{channel_name}'")
             kwargs[param_name] = out.sub()
@@ -307,7 +306,7 @@ async def run(
         for param_name, (channel_name, _) in outputs.items():
             kwargs[param_name] = runtime_channels[channel_name].out
 
-    writer = BlobLogWriter(log_dir) if log_dir else None
+    oblog = ObLog(log_dir) if log_dir else None
 
     async def run_node_and_close(node_fn: Callable) -> None:
         """Run a node and close its output channels when done."""
@@ -321,11 +320,11 @@ async def run(
 
     async with asyncio.TaskGroup() as tg:
         # Set up logging tasks for all outputs (but not playback channels)
-        if writer:
+        if oblog:
             for channel_name, channel in runtime_channels.items():
                 # Only log channels that are produced by nodes, not playback
                 if channel_name not in playback_channels:
-                    tg.create_task(_logging_task(channel, writer))
+                    tg.create_task(_logging_task(channel, oblog))
 
         # Start playback task if needed
         if playback_channels:
@@ -335,5 +334,5 @@ async def run(
         for node_fn in nodes:
             tg.create_task(run_node_and_close(node_fn))
 
-    if writer:
-        await writer.close()
+    if oblog:
+        await oblog.close()

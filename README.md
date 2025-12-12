@@ -45,17 +45,19 @@ Fast, simple binary log format: `(timestamp_ns: u64, length: u64, data: bytes)`.
 
 ```python
 from pathlib import Path
-from tinman.bloblog import BlobLogWriter, read_channel
+from tinman.bloblog import BlobLog
 
 # Write
-writer = BlobLogWriter(Path("logs"))
-write = writer.get_writer("sensor_data")
+blob = BlobLog(Path("logs"))
+write = blob.get_writer("sensor_data")
 write(b"raw bytes")  # Timestamp added automatically
-await writer.close()
+await blob.close()
 
 # Read
-async for timestamp, data in read_channel(Path("logs/sensor_data.blog")):
+blob = BlobLog(Path("logs"))
+async for timestamp, data in blob.read_channel("sensor_data"):
     print(f"{timestamp}: {len(data)} bytes")
+await blob.close()
 ```
 
 **Key features:**
@@ -71,34 +73,38 @@ async for timestamp, data in read_channel(Path("logs/sensor_data.blog")):
 Adds codec system on top of BlobLog for automatic encoding/decoding of messages.
 
 ```python
-from tinman.oblog import Codec, read_channel_decoded, write_channel_encoded
-from PIL import Image
-import io
+from pathlib import Path
+from tinman.oblog import Codec, ObLog
+import heapq
+from collections import Counter
 
-class ImageCodec(Codec[Image.Image]):
-    def __init__(self, format: str = "PNG"):
-        self.format = format  # PNG, BMP, TIFF, etc.
+class HuffmanCodec(Codec[str]):
+    """Compress strings using Huffman encoding based on training text."""
     
-    def encode(self, item: Image.Image) -> bytes:
-        buf = io.BytesIO()
-        item.save(buf, format=self.format)
-        return buf.getvalue()
+    def __init__(self, training_text: str):
+        ...
+
+    def encode(self, item: str) -> bytes:
+        # Convert string to bits using encoding table, pack to bytes
+        ...
     
-    def decode(self, data: Buffer) -> Image.Image:
-        return Image.open(io.BytesIO(bytes(data)))
+    def decode(self, data: bytes) -> str:
+        # Unpack bytes to bits, traverse tree to decode
+        ...
 
-# Write: codec metadata stored as first record (pickled codec instance with params)
-await write_channel_encoded("/camera", ImageCodec(format="PNG"), input_stream, writer)
+# Write: codec parameters (Huffman tree) stored as first record
+oblog = ObLog(Path("logs"))
+write = oblog.get_writer("messages", HuffmanCodec("the quick brown fox..."))
+write("hello world")  # Compressed using codec's tree
+await oblog.close()
 
-# Read: codec auto-detected and unpickled from first record (knows it's PNG)
-# Only allowed if caller has already imported ImageCodec.
-async for timestamp, img in read_channel_decoded(Path("logs/camera.blog")):
-    print(img.size)  # Already decoded PIL Image
+# Read: codec auto-restored from first record with exact same tree
+oblog = ObLog(Path("logs"))
+async for timestamp, text in oblog.read_channel("messages"):
+    print(text)  # Decompressed correctly - "hello world"
+await oblog.close()
 ```
 
-**Codec header format:**
-- First record in log file contains pickled codec instance
-- Subsequent records are encoded using that codec
 - On read, codec is unpickled (with security restrictions) and used to decode remaining records
 - Makes log files self-describing
 

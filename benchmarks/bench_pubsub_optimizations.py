@@ -192,9 +192,7 @@ class TestPublishOptimizations:
                     count += 1
                 return count
 
-            await asyncio.gather(
-                producer(), consumer(inp1), consumer(inp2), consumer(inp3)
-            )
+            await asyncio.gather(producer(), consumer(inp1), consumer(inp2), consumer(inp3))
 
         benchmark(lambda: asyncio.run(run()))
 
@@ -219,9 +217,7 @@ class TestPublishOptimizations:
                     count += 1
                 return count
 
-            await asyncio.gather(
-                producer(), consumer(inp1), consumer(inp2), consumer(inp3)
-            )
+            await asyncio.gather(producer(), consumer(inp1), consumer(inp2), consumer(inp3))
 
         benchmark(lambda: asyncio.run(run()))
 
@@ -246,8 +242,6 @@ class TestPublishOptimizations:
                     count += 1
                 return count
 
-            await asyncio.gather(
-                producer(), consumer(inp1), consumer(inp2), consumer(inp3)
-            )
+            await asyncio.gather(producer(), consumer(inp1), consumer(inp2), consumer(inp3))
 
         benchmark(lambda: asyncio.run(run()))

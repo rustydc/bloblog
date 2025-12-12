@@ -24,6 +24,7 @@ class SequentialOut:
 
     async def close(self) -> None:
         from tinman.pubsub import _CLOSED
+
         for sub in self.subscribers:
             await sub._queue.put(_CLOSED)
 
@@ -44,6 +45,7 @@ class ConcurrentOut:
 
     async def close(self) -> None:
         from tinman.pubsub import _CLOSED
+
         await asyncio.gather(*(sub._queue.put(_CLOSED) for sub in self.subscribers))
 
 

@@ -7,8 +7,7 @@ import mmap
 import os
 import struct
 import weakref
-from collections import defaultdict
-from collections.abc import AsyncGenerator, Awaitable, Buffer, Callable
+from collections.abc import AsyncGenerator, Buffer, Callable
 from heapq import heappop, heappush
 from pathlib import Path
 from time import time_ns
@@ -23,22 +22,30 @@ except (AttributeError, ValueError, OSError):
     IOV_MAX = 16  # POSIX minimum guaranteed
 
 
-class BlobLogWriter:
+class BlobLog:
+    """Binary log directory containing multiple channels.
+
+    Each channel is a separate .blog file storing (timestamp, raw bytes) records.
+    """
+
     def __init__(self, log_dir: Path):
         self.log_dir = log_dir
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.queues: dict[Path, asyncio.Queue[tuple[int, Buffer] | None]] = {}
-        self.tasks: dict[Path, asyncio.Task] = {}
+        self._queues: dict[str, asyncio.Queue[tuple[int, Buffer] | None]] = {}
+        self._tasks: dict[str, asyncio.Task] = {}
 
     def get_writer(self, channel: str) -> Callable[[Buffer], None]:
-        path = self.log_dir / f"{channel}.blog"
+        """Get a write function for a channel.
 
-        if path not in self.queues:
+        Returns the same writer if called multiple times for the same channel.
+        """
+        if channel not in self._queues:
             queue: asyncio.Queue[tuple[int, Buffer] | None] = asyncio.Queue()
-            self.queues[path] = queue
-            self.tasks[path] = asyncio.create_task(self._writer_task(path, queue))
+            self._queues[channel] = queue
+            path = self.log_dir / f"{channel}.blog"
+            self._tasks[channel] = asyncio.create_task(self._writer_task(path, queue))
 
-        queue = self.queues[path]
+        queue = self._queues[channel]
 
         def write(data: Buffer) -> None:
             queue.put_nowait((time_ns(), data))
@@ -48,6 +55,7 @@ class BlobLogWriter:
     async def _writer_task(
         self, path: Path, queue: asyncio.Queue[tuple[int, Buffer] | None]
     ) -> None:
+        """Background task that writes queued data to disk."""
         fd = await asyncio.to_thread(os.open, path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
         try:
             while True:
@@ -66,8 +74,6 @@ class BlobLogWriter:
                 # Write all at once, respecting IOV_MAX limit
                 chunks = []
                 for time, data in items:
-                    # Convert Buffer to bytes/memoryview for len() and writev()
-                    # This is zero-copy for bytes, memoryview, bytearray
                     data_mv = memoryview(data)
                     chunks.append(HEADER_STRUCT.pack(time, len(data_mv)))
                     chunks.append(data_mv)
@@ -82,12 +88,50 @@ class BlobLogWriter:
             await asyncio.to_thread(os.close, fd)
 
     async def close(self) -> None:
-        for queue in self.queues.values():
+        """Close all channels and flush pending writes."""
+        for queue in self._queues.values():
             queue.put_nowait(None)
-        for task in self.tasks.values():
+        for task in self._tasks.values():
             await task
-        self.queues.clear()
-        self.tasks.clear()
+        self._queues.clear()
+        self._tasks.clear()
+
+    async def read_channel(self, channel: str) -> AsyncGenerator[tuple[int, memoryview], None]:
+        """Read all records from a channel, yielding (timestamp, data) tuples.
+
+        The memoryview slices remain valid as long as they are referenced.
+        Resources are cleaned up via finalizer when no longer needed.
+        """
+        path = self.log_dir / f"{channel}.blog"
+        f = await asyncio.to_thread(open, path, "rb")
+        mm = await asyncio.to_thread(mmap.mmap, f.fileno(), 0, access=mmap.ACCESS_READ)
+        mv = memoryview(mm)
+
+        # Set up finalizer to clean up when memoryview is garbage collected
+        weakref.finalize(mv, _close_mmap, mv, mm, f)
+
+        offset = 0
+        size = len(mm)
+        batch_size = 1000  # Yield to event loop periodically
+        count = 0
+
+        while offset < size:
+            if size - offset < 16:
+                raise ValueError(
+                    f"Truncated header in {path}: expected 16 bytes, got {size - offset}"
+                )
+            time, data_len = HEADER_STRUCT.unpack_from(mm, offset)
+            offset += 16
+            if size - offset < data_len:
+                raise ValueError(
+                    f"Truncated data in {path}: expected {data_len} bytes, got {size - offset}"
+                )
+            data = mv[offset : offset + data_len]  # zero-copy memoryview slice
+            offset += data_len
+            yield time, data
+            count += 1
+            if count % batch_size == 0:
+                await asyncio.sleep(0)  # Yield to event loop
 
 
 def _close_mmap(mv: memoryview, mm: mmap.mmap, f: BinaryIO) -> None:
@@ -95,41 +139,6 @@ def _close_mmap(mv: memoryview, mm: mmap.mmap, f: BinaryIO) -> None:
     mv.release()
     mm.close()
     f.close()
-
-
-async def read_channel(path: Path) -> AsyncGenerator[tuple[int, memoryview], None]:
-    """Read a tinman blob file, yielding (timestamp, data) tuples.
-
-    The memoryview slices remain valid as long as they are referenced.
-    Resources are cleaned up via finalizer when no longer needed.
-    """
-    f = await asyncio.to_thread(open, path, "rb")
-    mm = await asyncio.to_thread(mmap.mmap, f.fileno(), 0, access=mmap.ACCESS_READ)
-    mv = memoryview(mm)
-
-    # Set up finalizer to clean up when memoryview is garbage collected
-    weakref.finalize(mv, _close_mmap, mv, mm, f)
-
-    offset = 0
-    size = len(mm)
-    batch_size = 1000  # Yield to event loop periodically
-    count = 0
-
-    while offset < size:
-        if size - offset < 16:
-            raise ValueError(f"Truncated header in {path}: expected 16 bytes, got {size - offset}")
-        time, data_len = HEADER_STRUCT.unpack_from(mm, offset)
-        offset += 16
-        if size - offset < data_len:
-            raise ValueError(
-                f"Truncated data in {path}: expected {data_len} bytes, got {size - offset}"
-            )
-        data = mv[offset : offset + data_len]  # zero-copy memoryview slice
-        offset += data_len
-        yield time, data
-        count += 1
-        if count % batch_size == 0:
-            await asyncio.sleep(0)  # Yield to event loop
 
 
 async def amerge[T](
