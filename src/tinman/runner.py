@@ -6,11 +6,11 @@ import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from time import time_ns
 from typing import Annotated, Any, get_args, get_origin, get_type_hints
 
-from .bloblog import BlobLogWriter
-from .oblog import Codec, PickleCodec, write_channel_encoded
-from .playback import _playback_task
+from .bloblog import BlobLogWriter, amerge
+from .oblog import Codec, PickleCodec, read_channel_decoded, write_channel_encoded
 from .pubsub import In, Out
 
 
@@ -151,6 +151,57 @@ async def _logging_task(channel: _ChannelRuntime, writer: BlobLogWriter) -> None
     
     sub = channel.out.sub()
     await write_channel_encoded(channel.name, channel.codec, sub, writer)
+
+
+async def _playback_task(
+    channels: dict[str, tuple[Path, Out]],
+    speed: float = 0,
+) -> None:
+    """Read from multiple log files, merge by timestamp, decode and publish.
+
+    Args:
+        channels: Map of channel_name -> (log_path, output_channel)
+        speed: Playback speed multiplier. 0 for as-fast-as-possible,
+               1.0 for realtime, 2.0 for double speed, 0.5 for half speed, etc.
+    """
+    if not channels:
+        return
+
+    # Build mapping from index to channel info
+    channel_list = list(channels.items())
+    paths = [path for _name, (path, _out) in channel_list]
+    
+    # Create decoded readers for each channel (handles codec extraction internally)
+    readers = [read_channel_decoded(path) for path in paths]
+
+    # Track timing for speed control
+    first_log_time: int | None = None
+    start_wall_time: int | None = None
+
+    try:
+        # Merge the decoded records from all channels
+        async for idx, time, item in amerge(*readers):
+            channel_name, (_path, out) = channel_list[idx]
+            
+            # Apply speed control
+            if speed:
+                if first_log_time is None:
+                    first_log_time = time
+                    start_wall_time = time_ns()
+                else:
+                    assert start_wall_time is not None
+                    log_delta = time - first_log_time
+                    wall_delta = time_ns() - start_wall_time
+                    wait_ns = (log_delta / speed) - wall_delta
+                    if wait_ns > 0:
+                        await asyncio.sleep(wait_ns / 1_000_000_000)
+
+            # Publish already-decoded item
+            await out.publish(item)
+    finally:
+        # Close all output channels when playback is done
+        for _name, (_path, out) in channels.items():
+            await out.close()
 
 
 async def run(
