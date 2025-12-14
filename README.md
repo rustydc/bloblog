@@ -120,11 +120,30 @@ async def producer(out: Annotated[Out[dict], "data"]):
     await out.publish({"any": "object"})  # Works with PickleCodec
 ```
 
+**Built-in Codecs:**
+```python
+from tinman.codecs import NumpyArrayCodec
+import numpy as np
+
+# Zero-copy NumPy arrays (3x faster than pickle!)
+oblog = ObLog(Path("logs"))
+write = oblog.get_writer("sensor_data", NumpyArrayCodec())
+write(np.random.rand(1000, 1000))  # 7.6 MB array
+await oblog.close()
+
+# Read with zero-copy (arrays are views into mmap)
+async for timestamp, arr in oblog.read_channel("sensor_data"):
+    print(arr.mean())  # No copy! Array is a view
+```
+
+See [codecs README](src/tinman/codecs/README.md) for more details and benchmarks.
+
 **Key features:**
 - Self-describing log files (codec in first record)
 - Codec registry with auto-registration
 - Safe unpickling with allowlist (only registered codecs)
 - Optional `PickleCodec` for prototyping (must be explicitly enabled)
+- Zero-copy NumPy codec (3x faster reads)
 - ~200 lines
 
 ---
