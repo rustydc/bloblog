@@ -1,4 +1,4 @@
-"""Simple example demonstrating node running.
+"""Simple example demonstrating node running with explicit logging and playback.
 
 Run with: uv run python -m examples.simple
 """
@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 from typing import Annotated
 
 from tinman import In, Out, enable_pickle_codec, run
+from tinman.run import create_logging_node, create_playback_graph, get_node_specs
 
 
 # Example 1: Simple function node
@@ -74,10 +75,12 @@ async def main():
         log_path = Path(log_dir)
 
         print("Example 1: Simple Pipeline (Producer -> Uppercase -> Consumer)")
+        print("-" * 70)
 
         await run([producer, uppercase, consumer])
 
-        print("\n\nExample 2: With Stateful Node (Producer -> Counter)")
+        print("\n\nExample 2: With Stateful Node and Explicit Logging")
+        print("-" * 70)
 
         counter = Counter(prefix="Item")
 
@@ -86,17 +89,37 @@ async def main():
             async for msg in input:
                 print(f"Consumer2: {msg}")
 
-        await run([producer, counter.run, consumer2], log_dir=log_path)
+        # Explicit logging workflow:
+        # 1. Get specs to extract channel codecs
+        # 2. Create a logger node that subscribes to all channels
+        # 3. Run with logger as an additional node
+        nodes = [producer, counter.run, consumer2]
+        specs = get_node_specs(nodes)
+        codecs = {ch: codec for spec in specs for _, (ch, codec) in spec.outputs.items()}
+        logger = create_logging_node(log_path, codecs)
+        
+        await run([*nodes, logger])  # Logger is just another node!
 
-        print("\n\nExample 3: Playback")
+        print("\n\nExample 3: Playback with Explicit Playback Graph")
+        print("-" * 70)
 
-        await run([consumer2], playback_dir=log_path)
+        # Explicit playback workflow:
+        # 1. create_playback_graph() analyzes what channels are missing
+        # 2. Reads codecs from log files
+        # 3. Creates playback nodes and returns [playback_node, *original_nodes]
+        graph = await create_playback_graph([consumer2], log_path)
+        await run(graph)  # Runs consumer2 with playback providing "counted" channel
 
-        print("\n\nExample 4: Playback (4.0x)")
-        await run([consumer2], playback_dir=log_path, playback_speed=4.0)
+        print("\n\nExample 4: Playback at 4.0x Speed")
+        print("-" * 70)
+        
+        graph = await create_playback_graph([consumer2], log_path, speed=4.0)
+        await run(graph)
 
+        print("\n" + "=" * 70)
         print("Done!")
         print(f"Logs stored in: {log_path}")
+        print("=" * 70)
 
 
 if __name__ == "__main__":

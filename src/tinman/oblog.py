@@ -57,6 +57,32 @@ class ObLog:
             item = codec.decode(data)
             yield timestamp, item
 
+    async def read_codec(self, channel: str) -> Codec:
+        """Read just the codec for a channel without reading data records.
+
+        This reads only the first record (which contains the pickled codec)
+        and returns it. Useful for inspecting channel metadata.
+
+        Args:
+            channel: Channel name to read codec from.
+
+        Returns:
+            The Codec instance stored in the channel.
+
+        Raises:
+            FileNotFoundError: If channel log file doesn't exist.
+            ValueError: If log file is empty or malformed.
+
+        Example:
+            >>> oblog = ObLog(Path("logs"))
+            >>> codec = await oblog.read_codec("camera")
+            >>> print(f"Camera uses codec: {type(codec).__name__}")
+        """
+        async for _timestamp, data in self.blob_log.read_channel(channel):
+            # First record is always the codec
+            return safe_unpickle_codec(bytes(data))
+        raise ValueError(f"Channel '{channel}' log file is empty")
+
     async def close(self) -> None:
         """Close the underlying BlobLog."""
         await self.blob_log.close()
