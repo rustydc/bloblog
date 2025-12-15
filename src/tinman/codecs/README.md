@@ -169,11 +169,3 @@ from tinman.codecs import DataFrameParquetCodec
 # Use Parquet for compressed storage
 write = oblog.get_writer("archive", DataFrameParquetCodec())
 ```
-
-## Future Codecs
-
-Other codecs that could be added:
-- `ArrowCodec` - Apache Arrow format
-- `ImageCodec` - Compressed images (PNG, JPEG)
-- `ProtobufCodec` - Protocol buffers
-- `JsonCodec` - JSON with schema

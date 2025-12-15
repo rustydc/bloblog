@@ -11,9 +11,20 @@ from __future__ import annotations
 
 import struct
 from collections.abc import Buffer, Mapping
-from typing import Any
+from dataclasses import is_dataclass
+from typing import Any, Protocol, TypeVar
 
 from ..oblog import Codec
+
+
+class _DataclassInstance(Protocol):
+    """Protocol for dataclass instances (for type checking)."""
+
+    __dataclass_fields__: dict[str, Any]
+
+
+# Type variable for dataclasses bound to dataclass protocol
+T = TypeVar("T", bound=_DataclassInstance)
 
 
 class DictCodec(Codec[dict[str, Any]]):
@@ -459,7 +470,15 @@ class DataclassCodec[T](Codec[T]):
                     Must match the dataclass field names.
             allow_missing: If True, missing fields are allowed (for optional fields).
                           Default is False (all fields required).
+        
+        Raises:
+            TypeError: If dataclass_type is not a dataclass.
         """
+        if not is_dataclass(dataclass_type):
+            raise TypeError(
+                f"{dataclass_type} is not a dataclass. "
+                f"Use @dataclass decorator or pass a dataclass type."
+            )
         self.dataclass_type = dataclass_type
         self.dict_codec = DictCodec(schema, allow_missing=allow_missing)
 
@@ -475,7 +494,7 @@ class DataclassCodec[T](Codec[T]):
         from dataclasses import asdict
         
         # Convert dataclass to dict, then use DictCodec
-        d = asdict(item)
+        d = asdict(item)  # type: ignore[arg-type]
         return self.dict_codec.encode(d)
 
     def decode(self, data: Buffer) -> T:

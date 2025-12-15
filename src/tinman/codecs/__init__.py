@@ -30,12 +30,15 @@ from .composite import (
 )
 from .numpy import NumpyArrayCodec
 from .pandas import DataFrameCodec, DataFrameParquetCodec
+from .protobuf import ProtobufCodec
 
 __all__ = [
     # Zero-copy specialized codecs
     "NumpyArrayCodec",
     "DataFrameCodec",
     "DataFrameParquetCodec",
+    # Protocol Buffer codec
+    "ProtobufCodec",
     # Composite codec utilities
     "DataclassCodec",
     "DictCodec",
