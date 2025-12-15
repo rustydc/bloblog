@@ -1,4 +1,4 @@
-"""Tests for run module (high-level utilities and execution)."""
+"""Tests for launcher module (high-level utilities and execution)."""
 
 import asyncio
 import time
@@ -288,3 +288,78 @@ class TestPlaybackNode:
         
         with pytest.raises(FileNotFoundError, match="No log file for channel"):
             await create_playback_graph([consumer], tmp_path)
+
+
+class TestConvenienceFunctions:
+    @pytest.mark.asyncio
+    async def test_run_with_log_dir(self, tmp_path):
+        """Test that run() with log_dir automatically creates logging node."""
+        messages = ["log1", "log2", "log3"]
+        producer = make_producer_node("test", messages)
+        consumer, received = make_consumer_node("test_output", len(messages))
+        
+        # Run with automatic logging
+        await run([producer, consumer], log_dir=tmp_path)
+        
+        assert received == messages
+        
+        # Verify log file was created
+        log_file = tmp_path / "test_output.blog"
+        assert log_file.exists()
+        
+        # Read back and verify
+        oblog = ObLog(tmp_path)
+        logged = []
+        async for _, msg in oblog.read_channel("test_output"):
+            logged.append(msg)
+        await oblog.close()
+        
+        assert logged == messages
+    
+    @pytest.mark.asyncio
+    async def test_playback_convenience(self, tmp_path):
+        """Test that playback() convenience function works."""
+        from tinman import playback
+        
+        # First, record some data
+        messages = ["play1", "play2", "play3"]
+        producer = make_producer_node("recorded", messages)
+        
+        await run([producer], log_dir=tmp_path)
+        
+        # Now use playback() convenience function
+        received = []
+        
+        async def consumer(inp: Annotated[In[str], "recorded_output"]) -> None:
+            async for msg in inp:
+                received.append(msg)
+        
+        await playback([consumer], tmp_path)
+        
+        assert received == messages
+    
+    @pytest.mark.asyncio
+    async def test_playback_with_speed(self, tmp_path):
+        """Test that playback() respects speed parameter."""
+        from tinman import playback
+        
+        # Record data
+        messages = ["msg1", "msg2"]
+        producer = make_producer_node("timed", messages)
+        
+        await run([producer], log_dir=tmp_path)
+        
+        # Playback at 2x speed
+        received = []
+        
+        async def consumer(inp: Annotated[In[str], "timed_output"]) -> None:
+            async for msg in inp:
+                received.append(msg)
+        
+        start = time.time()
+        await playback([consumer], tmp_path, speed=2.0)
+        duration = time.time() - start
+        
+        assert received == messages
+        # Should complete quickly at 2x speed
+        assert duration < 1.0

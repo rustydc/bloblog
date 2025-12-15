@@ -1,4 +1,4 @@
-"""Simple example demonstrating node running with explicit logging and playback.
+"""Simple example demonstrating node running with logging and playback.
 
 Run with: uv run python -m examples.simple
 """
@@ -8,8 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Annotated
 
-from tinman import In, Out, enable_pickle_codec, run
-from tinman.run import create_logging_node, create_playback_graph, get_node_specs
+from tinman import In, Out, enable_pickle_codec, run, playback
 
 
 # Example 1: Simple function node
@@ -60,9 +59,9 @@ class Counter:
         """Add counter to each message."""
         print("Counter: Starting...")
         async for msg in messages:
-            self.count += 1
+            self.count += len(msg)
             counted = f"[{self.prefix} {self.count}] {msg}"
-            print(f"Counter: {msg} -> {counted}")
+            print(f"Counter: {msg} characters -> {counted}")
             await counted_out.publish(counted)
         print(f"Counter: Done ({self.count} messages)")
 
@@ -77,44 +76,32 @@ async def main():
         print("Example 1: Simple Pipeline (Producer -> Uppercase -> Consumer)")
         print("-" * 70)
 
-        await run([producer, uppercase, consumer])
+        ex1_log = log_path / "ex1"
+        await run([producer, uppercase, consumer], log_dir=ex1_log)
 
-        print("\n\nExample 2: With Stateful Node and Explicit Logging")
+        print("\n\nExample 2: Playback with different processor")
         print("-" * 70)
 
-        counter = Counter(prefix="Item")
+        counter = Counter(prefix="Characters:")
 
         # Consumer for counted messages
         async def consumer2(input: Annotated[In[str], "counted"]):
             async for msg in input:
                 print(f"Consumer2: {msg}")
 
-        # Explicit logging workflow:
-        # 1. Get specs to extract channel codecs
-        # 2. Create a logger node that subscribes to all channels
-        # 3. Run with logger as an additional node
-        nodes = [producer, counter.run, consumer2]
-        specs = get_node_specs(nodes)
-        codecs = {ch: codec for spec in specs for _, (ch, codec) in spec.outputs.items()}
-        logger = create_logging_node(log_path, codecs)
-        
-        await run([*nodes, logger])  # Logger is just another node!
+        # Playback "messages", run through counter (stateful), log "counted" output
+        ex2_log = log_path / "ex2"
+        await playback([counter.run, consumer2], playback_dir=ex1_log, log_dir=ex2_log, speed=1.0)
 
-        print("\n\nExample 3: Playback with Explicit Playback Graph")
+        print("\n\nExample 3: Playback at 5.0x Speed")
         print("-" * 70)
 
-        # Explicit playback workflow:
-        # 1. create_playback_graph() analyzes what channels are missing
-        # 2. Reads codecs from log files
-        # 3. Creates playback nodes and returns [playback_node, *original_nodes]
-        graph = await create_playback_graph([consumer2], log_path)
-        await run(graph)  # Runs consumer2 with playback providing "counted" channel
+        await playback([consumer2], playback_dir=ex2_log, speed=5.0)
 
-        print("\n\nExample 4: Playback at 4.0x Speed")
+        print("\n\nExample 4: Playback at full speed")
         print("-" * 70)
-        
-        graph = await create_playback_graph([consumer2], log_path, speed=4.0)
-        await run(graph)
+
+        await playback([consumer2], playback_dir=ex2_log)
 
         print("\n" + "=" * 70)
         print("Done!")

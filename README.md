@@ -2,12 +2,13 @@
 
 **A minimal async framework for building data pipelines with logging and playback.**
 
-Tinman is built from four composable modules:
+Tinman is built from five composable modules:
 
 1. **BlobLog** - Fast binary logging (timestamp + raw bytes)
 2. **ObLog** - Object logging with codecs (builds on BlobLog)
 3. **PubSub** - Simple async pub/sub channels  
-4. **Runner** - Autowired coroutines with logging and playback (uses all of the above)
+4. **Runtime** - Core execution engine with graph validation
+5. **Launcher** - High-level utilities for logging and playback
 
 ## Installation
 
@@ -181,17 +182,51 @@ async def bursty_consumer(inp: Annotated[In[str], "messages", 100]):
 
 ---
 
-### 4. Runner - Autowired Coroutines
+### 4. Runtime - Core Execution Engine
 
-Wires async functions together with PubSub using type annotations, with automatic ObLog logging and playback.
+Low-level graph execution with automatic channel wiring and validation.
+
+```python
+from typing import Annotated
+from tinman import In, Out, run
+from tinman.runtime import get_node_specs, validate_nodes, run_nodes
+
+async def producer(out: Annotated[Out[str], "messages"]):
+    for i in range(10):
+        await out.publish(f"message {i}")
+
+async def consumer(inp: Annotated[In[str], "messages"]):
+    async for msg in inp:
+        print(msg)
+
+# High-level: simple execution
+await run([producer, consumer])
+
+# Low-level: manual control
+specs = get_node_specs([producer, consumer])
+validate_nodes(specs)
+await run_nodes(specs)
+```
+
+**Key features:**
+- `get_node_specs()` - Extract channel metadata from node signatures
+- `validate_nodes()` - Check graph connectivity (no duplicate outputs, all inputs have producers)
+- `run_nodes()` - Wire channels and execute nodes concurrently
+- `NodeSpec` - Dataclass for node metadata (inputs, outputs, dict injection)
+- Introspection via `Annotated[In[T], "channel"]` and `Annotated[Out[T], "channel", codec]`
+- Support for `dict[str, In]` to receive all channels (for logging/monitoring)
+- ~370 lines
+
+---
+
+### 5. Launcher - High-Level Utilities
+
+Convenient functions for common patterns: logging and playback.
 
 ```python
 from typing import Annotated
 from pathlib import Path
-from tinman import In, Out, run, enable_pickle_codec
-
-# Use pickle for prototyping (trusted data only)
-enable_pickle_codec()
+from tinman import In, Out, run, playback
 
 async def sensors(out: Annotated[Out[dict], "raw_sensors"]):
     """Read sensor data at 10Hz"""
@@ -223,10 +258,10 @@ async def planner(
         else:
             await out.publish("FORWARD")
 
-# First run: full pipeline with logging
+# First run: Automatic logging with log_dir parameter
 await run([sensors, perception, planner], log_dir=Path("logs"))
 
-# Second run: test new planner with recorded sensor data
+# Second run: Test new planner with recorded data
 async def aggressive_planner(
     inp: Annotated[In[dict], "world_state"],
     out: Annotated[Out[str], "commands"]
@@ -235,23 +270,37 @@ async def aggressive_planner(
     async for world in inp:
         await out.publish("YOLO" if not world["obstacle"] else "STOP")
 
-await run([aggressive_planner], playback_dir=Path("logs"))
-# This replays world_state from logs, runs new planner
-# No need to re-run sensors or perception
+# Automatic playback - replays world_state, runs new planner
+await playback([aggressive_planner], Path("logs"))
 
 # Optional: control playback speed
-await run([aggressive_planner], playback_dir=Path("logs"), playback_speed=1.0)
-# speed=0 (default): as fast as possible
+await playback([aggressive_planner], Path("logs"), speed=1.0)
+# speed=float('inf') (default): as fast as possible
 # speed=1.0: realtime (respects original timestamps)
 # speed=2.0: double speed
 # speed=0.5: half speed
 ```
 
+**Advanced usage (more control):**
+```python
+from tinman import get_node_specs
+from tinman.launcher import create_logging_node, create_playback_graph
+
+# Manual logging with channel filtering
+specs = get_node_specs([sensors, perception, planner])
+codecs = {ch: codec for spec in specs for _, (ch, codec) in spec.outputs.items()}
+logger = create_logging_node(Path("logs"), codecs, channel_filter={"important_channel"})
+await run([sensors, perception, planner, logger])
+
+# Manual playback graph creation
+graph = await create_playback_graph([aggressive_planner], Path("logs"))
+await run(graph)
+```
+
 **Key features:**
-- Automatic channel wiring from annotations
-- Concurrent node execution
-- Optional logging to all output channels
-- Playback mode for testing/development
-- Playback speed control (0=fast, 1.0=realtime, 2.0=2x, etc.)
-- Validation (no duplicate outputs, all inputs have sources)
-- ~350 lines
+- `run()` - Execute nodes, optionally with automatic logging via `log_dir=`
+- `playback()` - Execute nodes with automatic playback from logs
+- `create_logging_node()` - Factory for custom logging nodes with channel filtering
+- `create_playback_graph()` - Factory for custom playback graphs
+- Playback speed control
+- ~300 lines

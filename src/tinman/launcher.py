@@ -1,15 +1,18 @@
-"""High-level node graph launchers and utilities.
+"""High-level launchers and utilities for node graphs.
 
 This module provides convenient functions for running node graphs with
 common patterns like logging and playback. It builds on the low-level
 execution engine in runtime.py.
 
 Key functions:
-- run(): Main entry point for executing a node graph
-- get_node_specs(): Extract channel metadata from nodes
+- run(): Convenience wrapper for executing a node graph
 - create_logging_node(): Factory for logging nodes
 - create_playback_graph(): Factory for playback graphs
+
+Core functions are in runtime.py:
+- get_node_specs(): Extract channel metadata from nodes
 - validate_nodes(): Validate graph connectivity
+- run_nodes(): Low-level execution engine
 """
 
 from __future__ import annotations
@@ -27,37 +30,43 @@ from .runtime import NodeSpec, get_node_specs, run_nodes
 
 def create_logging_node(
     log_dir: Path,
-    channel_specs: dict[str, Codec] | None = None,
+    nodes: list[Callable[..., Awaitable[None]] | NodeSpec] | None = None,
     channel_filter: set[str] | None = None
 ) -> Callable:
     """Create a node that logs all channels to disk.
 
     Args:
         log_dir: Directory to write log files.
-        channel_specs: Optional map of channel_name -> codec. If None, codecs will be
-                      extracted from the first message on each channel (requires the
-                      runtime to provide codec info).
+        nodes: Optional list of nodes to extract codecs from. If None, no channels
+              will be logged (useful if you want to add nodes later).
         channel_filter: If provided, only log these channels. If None, log all.
 
     Returns:
         An async node function that can be passed to run().
 
     Example:
-        >>> # Get specs from existing nodes to extract codecs
-        >>> specs = get_node_specs([producer, consumer])
-        >>> codecs = {ch: codec for spec in specs
-        ...           for _, (ch, codec) in spec.outputs.items()}
-        >>> logger = create_logging_node(Path("logs"), codecs)
+        >>> # Extract codecs from nodes automatically
+        >>> logger = create_logging_node(Path("logs"), [producer, consumer])
         >>> await run([producer, consumer, logger])
 
-        >>> # Or use without pre-specified codecs (will auto-detect)
-        >>> logger = create_logging_node(Path("logs"))
+        >>> # Filter specific channels
+        >>> logger = create_logging_node(Path("logs"), [producer], channel_filter={"important"})
         >>> await run([producer, consumer, logger])
 
     Note:
         The created node will automatically receive all output channels via
         the dict[str, In] injection mechanism.
     """
+    
+    # Extract codecs from nodes if provided
+    channel_specs: dict[str, Codec] | None = None
+    if nodes is not None:
+        specs = get_node_specs(nodes)
+        channel_specs = {
+            channel_name: codec
+            for spec in specs
+            for _, (channel_name, codec) in spec.outputs.items()
+        }
 
     async def logging_node(channels: dict[str, In]) -> None:
         """Log all subscribed channels to disk."""
@@ -96,7 +105,7 @@ def create_logging_node(
 
 
 async def create_playback_graph(
-    nodes: list[Callable],
+    nodes: list[Callable | NodeSpec],
     playback_dir: Path,
     speed: float = 1.0
 ) -> list[Callable | NodeSpec]:
@@ -220,12 +229,14 @@ async def create_playback_graph(
     return [playback_spec, *nodes]
 
 
-async def run(nodes: list[Callable[..., Awaitable[None]] | NodeSpec]) -> None:
-    """Run a graph of nodes, wiring their channels and executing them concurrently.
+async def run(
+    nodes: list[Callable[..., Awaitable[None]] | NodeSpec],
+    log_dir: Path | None = None,
+) -> None:
+    """Run a graph of nodes, optionally with logging.
 
-    This is a convenience wrapper around runtime.run_nodes() that provides a
-    cleaner API for common use cases. For logging or playback, use
-    create_logging_node() or create_playback_graph() to create explicit nodes.
+    This is a convenience wrapper around runtime.run_nodes() that optionally
+    adds a logging node to record all output channels.
 
     Args:
         nodes: List of async callables (functions, bound methods, or NodeSpec objects).
@@ -233,6 +244,8 @@ async def run(nodes: list[Callable[..., Awaitable[None]] | NodeSpec]) -> None:
                - Inputs: Annotated[In[T], "channel_name"]
                - Outputs: Annotated[Out[T], "channel_name", codec_instance]
                - All channels: dict[str, In] (for monitoring/logging nodes)
+        log_dir: Optional directory to log all output channels. If provided,
+                automatically creates and adds a logging node.
 
     Raises:
         TypeError: If nodes are not async callables.
@@ -242,12 +255,58 @@ async def run(nodes: list[Callable[..., Awaitable[None]] | NodeSpec]) -> None:
         >>> # Simple pipeline
         >>> await run([producer, consumer])
 
-        >>> # With logging
-        >>> logger = create_logging_node(Path("logs"), codecs)
-        >>> await run([producer, consumer, logger])
+        >>> # With automatic logging
+        >>> await run([producer, consumer], log_dir=Path("logs"))
 
-        >>> # With playback
-        >>> graph = await create_playback_graph([consumer], Path("logs"))
-        >>> await run(graph)
+        >>> # Manual logging (more control)
+        >>> logger = create_logging_node(Path("logs"), codecs, channel_filter={"important"})
+        >>> await run([producer, consumer, logger])
     """
+    if log_dir is not None:
+        # Create logging node from nodes
+        logger = create_logging_node(log_dir, nodes)
+        nodes = nodes + [logger]
     await run_nodes(nodes)
+
+async def playback(
+    nodes: list[Callable[..., Awaitable[None]] | NodeSpec],
+    playback_dir: Path,
+    speed: float = float('inf'),
+    log_dir: Path | None = None,
+) -> None:
+    """Run nodes with playback from logs, optionally logging outputs.
+
+    This convenience function automatically creates a playback graph for any
+    missing input channels and executes it.
+
+    Args:
+        nodes: List of async callables that consume channels.
+        playback_dir: Directory containing log files to play back from.
+        speed: Playback speed multiplier:
+               - float('inf') (default): As fast as possible
+               - 1.0: Realtime (respects original timestamps)
+               - 2.0: Double speed
+               - 0.5: Half speed
+        log_dir: Optional directory to log output channels. Useful for
+                recording transformed/processed data.
+
+    Raises:
+        FileNotFoundError: If required log files don't exist.
+        ValueError: If channel configuration is invalid.
+
+    Example:
+        >>> # Test new logic with recorded data
+        >>> await playback([new_planner], Path("logs"))
+
+        >>> # Slow motion playback for debugging
+        >>> await playback([new_planner], Path("logs"), speed=0.5)
+        
+        >>> # Playback and log transformed outputs
+        >>> await playback([transform], Path("logs"), log_dir=Path("processed"))
+    """
+    graph = await create_playback_graph(nodes, playback_dir, speed=speed)
+    
+    if log_dir is not None:
+        # Only log outputs from the user's nodes, not the playback node
+        graph.append(create_logging_node(log_dir, nodes))
+    await run_nodes(graph)
