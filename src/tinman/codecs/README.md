@@ -58,15 +58,6 @@ The codec stores arrays in a compact binary format:
      4 bytes      variable     4 B   8*ndim B   variable
 ```
 
-### Performance
-
-See [benchmarks/NUMPY_CODEC_BENCHMARKS.md](../../benchmarks/NUMPY_CODEC_BENCHMARKS.md) for detailed benchmarks.
-
-Summary:
-- **3x faster** reads than pickle
-- **5.7x faster** reads than writes (for large arrays)
-- **0 MB** memory overhead for 76 MB arrays
-
 ### Supported Dtypes
 
 All NumPy dtypes are supported:
@@ -123,10 +114,65 @@ async for _, arr in oblog.read_channel("data"):
     mutable_arr[0] = 42
 ```
 
+## DataFrameCodec
+
+Zero-copy codec for pandas DataFrames with memory-mapped reads.
+
+### Features
+
+- ✅ **Zero-copy reads** for numeric columns
+- ✅ **2.3x faster** than copying for large DataFrames
+- ✅ **No memory overhead** - columns are views
+- ✅ **Works with any numeric dtype**
+- ✅ **Read-only** for safety
+
+### Usage
+
+```python
+from pathlib import Path
+from tinman import ObLog
+from tinman.codecs import DataFrameCodec
+import pandas as pd
+import numpy as np
+
+# Write sensor data
+oblog = ObLog(Path("sensor_logs"))
+write = oblog.get_writer("readings", DataFrameCodec())
+
+df = pd.DataFrame({
+    'timestamp': np.arange(1000, dtype=np.int64),
+    'temperature': 20.0 + np.random.randn(1000) * 2,
+    'humidity': 65.0 + np.random.randn(1000) * 5,
+})
+write(df)
+await oblog.close()
+
+# Read with zero-copy
+oblog = ObLog(Path("sensor_logs"))
+async for _, df in oblog.read_channel("readings"):
+    print(f"Mean temp: {df['temperature'].mean()}")
+    # Columns are views!
+await oblog.close()
+```
+
+### DataFrameParquetCodec
+
+Alternative codec using Apache Parquet format:
+- Highly compressed
+- Industry standard
+- NOT zero-copy (decompression required)
+- Best for long-term storage and compatibility
+
+```python
+from tinman.codecs import DataFrameParquetCodec
+
+# Use Parquet for compressed storage
+write = oblog.get_writer("archive", DataFrameParquetCodec())
+```
+
 ## Future Codecs
 
 Other codecs that could be added:
-- `PandasDataFrameCodec` - Zero-copy DataFrames
 - `ArrowCodec` - Apache Arrow format
 - `ImageCodec` - Compressed images (PNG, JPEG)
 - `ProtobufCodec` - Protocol buffers
