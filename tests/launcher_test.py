@@ -342,24 +342,103 @@ class TestConvenienceFunctions:
     async def test_playback_with_speed(self, tmp_path):
         """Test that playback() respects speed parameter."""
         from tinman import playback
-        
+
         # Record data
         messages = ["msg1", "msg2"]
         producer = make_producer_node("timed", messages)
-        
+
         await run([producer], log_dir=tmp_path)
-        
+
         # Playback at 2x speed
         received = []
-        
+
         async def consumer(inp: Annotated[In[str], "timed_output"]) -> None:
             async for msg in inp:
                 received.append(msg)
-        
+
         start = time.time()
         await playback([consumer], tmp_path, speed=2.0)
         duration = time.time() - start
-        
+
         assert received == messages
         # Should complete quickly at 2x speed
         assert duration < 1.0
+
+    @pytest.mark.asyncio
+    async def test_playback_fast_forward_with_timer(self, tmp_path):
+        """Test fast-forward playback with Timer coordination."""
+        from tinman import playback, Timer
+
+        # Record data
+        messages = ["msg1", "msg2", "msg3"]
+        producer = make_producer_node("data", messages)
+        await run([producer], log_dir=tmp_path)
+
+        # Playback with a node that uses Timer
+        events: list[str] = []
+
+        async def timed_consumer(
+            inp: Annotated[In[str], "data_output"],
+            timer: Timer,
+        ) -> None:
+            async for msg in inp:
+                events.append(f"msg:{msg}@{timer.time_ns()}")
+
+        # Fast-forward playback (default speed=inf)
+        await playback([timed_consumer], tmp_path)
+
+        assert len(events) == 3
+        # All messages should be received
+        assert all(e.startswith("msg:msg") for e in events)
+
+    @pytest.mark.asyncio
+    async def test_playback_fast_forward_timer_sleep(self, tmp_path):
+        """Test that Timer.sleep() works correctly during fast-forward playback."""
+        from tinman import playback, Timer
+
+        # Record data - just ONE message to simplify
+        messages = ["a"]
+        producer = make_producer_node("input", messages)
+        await run([producer], log_dir=tmp_path)
+
+        # Consumer that sleeps after processing
+        processed: list[str] = []
+        sleep_completed = False
+
+        async def sleeping_consumer(
+            inp: Annotated[In[str], "input_output"],
+            timer: Timer,
+        ) -> None:
+            nonlocal sleep_completed
+            async for msg in inp:
+                processed.append(msg)
+                # Sleep for 100ms (virtual time)
+                await timer.sleep(0.1)
+                sleep_completed = True
+
+        # Fast-forward should complete quickly despite sleep calls
+        start = time.time()
+        await playback([sleeping_consumer], tmp_path)
+        duration = time.time() - start
+
+        assert processed == messages
+        assert sleep_completed
+        # Should complete in well under 1 second (no real sleeping)
+        assert duration < 0.5
+
+    @pytest.mark.asyncio
+    async def test_create_playback_graph_requires_clock_for_inf(self, tmp_path):
+        """Test that create_playback_graph raises if speed=inf without clock."""
+        from tinman.launcher import create_playback_graph
+
+        # Record some data first
+        messages = ["test"]
+        producer = make_producer_node("data", messages)
+        await run([producer], log_dir=tmp_path)
+
+        # Try to create playback graph with speed=inf but no clock
+        async def consumer(inp: Annotated[In[str], "data_output"]) -> None:
+            pass
+
+        with pytest.raises(ValueError, match="requires a VirtualClock"):
+            await create_playback_graph([consumer], tmp_path, speed=float('inf'))

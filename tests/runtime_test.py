@@ -87,3 +87,125 @@ class TestValidateNodes:
         
         # Should not raise - logger node doesn't need explicit inputs
         validate_nodes([producer, logger])
+
+    def test_detects_timer_param(self):
+        """Test that get_node_specs detects Timer parameters."""
+        from tinman import Timer
+        
+        async def timed_node(timer: Timer) -> None:
+            pass
+        
+        specs = get_node_specs([timed_node])
+        assert len(specs) == 1
+        assert specs[0].timer_param == "timer"
+
+    def test_rejects_multiple_timer_params(self):
+        """Test that multiple Timer parameters raise an error."""
+        from tinman import Timer
+        
+        async def bad_node(timer1: Timer, timer2: Timer) -> None:
+            pass
+        
+        with pytest.raises(ValueError, match="multiple Timer"):
+            get_node_specs([bad_node])
+
+
+class TestTimerInjection:
+    """Tests for Timer parameter injection in run_nodes."""
+    
+    @pytest.mark.asyncio
+    async def test_timer_injected_into_node(self):
+        """Test that Timer is injected into nodes that request it."""
+        from tinman import Timer
+        from tinman.runtime import run_nodes
+        
+        received_timer = None
+        
+        async def timed_producer(
+            timer: Timer,
+            out: Annotated[Out[str], "data", StringCodec()]
+        ) -> None:
+            nonlocal received_timer
+            received_timer = timer
+            await out.publish("hello")
+        
+        consumer, results = make_consumer_node("data", 1)
+        await run_nodes([timed_producer, consumer])
+        
+        assert received_timer is not None
+        assert isinstance(received_timer, Timer)
+    
+    @pytest.mark.asyncio
+    async def test_custom_timer_injected(self):
+        """Test that a custom Timer can be provided to run_nodes."""
+        from tinman import Timer, VirtualClock, FastForwardTimer
+        from tinman.runtime import run_nodes
+        
+        clock = VirtualClock(start_time=1000)
+        custom_timer = FastForwardTimer(clock)
+        received_timer = None
+        
+        async def timed_producer(
+            timer: Timer,
+            out: Annotated[Out[str], "data", StringCodec()]
+        ) -> None:
+            nonlocal received_timer
+            received_timer = timer
+            await out.publish("hello")
+        
+        consumer, results = make_consumer_node("data", 1)
+        await run_nodes([timed_producer, consumer], timer=custom_timer)
+        
+        assert received_timer is custom_timer
+    
+    @pytest.mark.asyncio
+    async def test_timer_time_ns_works(self):
+        """Test that the injected timer's time_ns works."""
+        from tinman import Timer
+        from tinman.runtime import run_nodes
+        
+        recorded_time = None
+        
+        async def timed_producer(
+            timer: Timer,
+            out: Annotated[Out[str], "data", StringCodec()]
+        ) -> None:
+            nonlocal recorded_time
+            recorded_time = timer.time_ns()
+            await out.publish("hello")
+        
+        consumer, _ = make_consumer_node("data", 1)
+        await run_nodes([timed_producer, consumer])
+        
+        assert recorded_time is not None
+        assert recorded_time > 0
+    
+    @pytest.mark.asyncio
+    async def test_timer_sleep_works(self):
+        """Test that the injected timer's sleep works."""
+        from tinman import Timer, VirtualClock, FastForwardTimer
+        from tinman.runtime import run_nodes
+        import asyncio
+        
+        clock = VirtualClock(start_time=0)
+        timer = FastForwardTimer(clock)
+        sleep_completed = False
+        
+        async def timed_producer(
+            timer: Timer,
+            out: Annotated[Out[str], "data", StringCodec()]
+        ) -> None:
+            nonlocal sleep_completed
+            # Schedule a sleep
+            sleep_task = asyncio.create_task(timer.sleep(1.0))
+            await asyncio.sleep(0)  # Let it start
+            # Advance the clock
+            await clock.advance_to(1_000_000_000)
+            await sleep_task
+            sleep_completed = True
+            await out.publish("hello")
+        
+        consumer, _ = make_consumer_node("data", 1)
+        await run_nodes([timed_producer, consumer], timer=timer)
+        
+        assert sleep_completed

@@ -26,6 +26,7 @@ from .bloblog import amerge
 from .oblog import Codec, ObLog
 from .pubsub import In, Out
 from .runtime import NodeSpec, get_node_specs, run_nodes
+from .timer import Timer, ScaledTimer, FastForwardTimer, VirtualClock
 
 
 def create_logging_node(
@@ -107,7 +108,8 @@ def create_logging_node(
 async def create_playback_graph(
     nodes: list[Callable | NodeSpec],
     playback_dir: Path,
-    speed: float = 1.0
+    speed: float = 1.0,
+    clock: VirtualClock | None = None,
 ) -> list[Callable | NodeSpec]:
     """Create a graph with playback nodes injected for missing inputs.
 
@@ -118,7 +120,10 @@ async def create_playback_graph(
     Args:
         nodes: List of node callables to run.
         playback_dir: Directory containing .blog log files.
-        speed: Playback speed multiplier (1.0 = real-time, 2.0 = 2x speed, etc.).
+        speed: Playback speed multiplier (1.0 = real-time, 2.0 = 2x speed, 
+               inf = fast-forward).
+        clock: VirtualClock for fast-forward mode. Required if speed=inf.
+               The playback node will advance this clock as it processes messages.
 
     Returns:
         List of nodes with playback nodes injected. Original nodes may include
@@ -126,14 +131,23 @@ async def create_playback_graph(
 
     Raises:
         FileNotFoundError: If a required log file doesn't exist.
+        ValueError: If speed=inf but no clock provided.
 
     Example:
         >>> # Record some data
         >>> await run([producer, create_logging_node(Path("logs"), codecs)])
-        >>> # Play back later
+        >>> # Play back later (real-time)
         >>> graph = await create_playback_graph([consumer], Path("logs"))
-        >>> await run(graph)
+        >>> await run_nodes(graph)
+        >>> # Fast-forward playback
+        >>> clock = VirtualClock()
+        >>> timer = FastForwardTimer(clock)
+        >>> graph = await create_playback_graph([consumer], Path("logs"), speed=float('inf'), clock=clock)
+        >>> await run_nodes(graph, timer=timer)
     """
+    if speed == float('inf') and clock is None:
+        raise ValueError("Fast-forward mode (speed=inf) requires a VirtualClock")
+
     # Parse nodes to find what channels are needed and what's provided
     specs = get_node_specs(nodes)
     all_inputs = set()
@@ -186,13 +200,26 @@ async def create_playback_graph(
             # Merge all streams and publish with timing
             start_time: int | None = None
             start_real: int | None = None
+            first_message = True
+            last_timestamp: int = 0
 
             async for source_idx, timestamp, item in amerge(*readers):
                 channel_name, _ = channel_list[source_idx]
                 out = outputs[channel_name]
+                last_timestamp = timestamp
 
-                # Apply speed control if needed
-                if speed != float('inf') and speed > 0:
+                if speed == float('inf'):
+                    # Fast-forward mode: advance virtual clock
+                    assert clock is not None
+                    if first_message:
+                        # Initialize clock to first message timestamp
+                        clock._time = timestamp
+                        first_message = False
+                    else:
+                        # Advance clock, waking any timers in between
+                        await clock.advance_to(timestamp)
+                elif speed > 0:
+                    # Speed-controlled playback with real delays
                     if start_time is None:
                         start_time = timestamp
                         start_real = time_ns()
@@ -208,6 +235,13 @@ async def create_playback_graph(
                             await asyncio.sleep((target_real - current) / 1e9)
 
                 await out.publish(item)
+
+            # After all messages, flush any remaining timers
+            if speed == float('inf') and clock is not None:
+                # Yield to let consumers process their messages and schedule timers
+                await asyncio.sleep(0)
+                # Wake all pending timers
+                await clock.flush()
         finally:
             # Close all oblogs
             for oblog_reader in oblogs:
@@ -222,7 +256,8 @@ async def create_playback_graph(
         node_fn=playback_node,
         inputs={},
         outputs=playback_outputs,
-        all_channels_param=None
+        all_channels_param=None,
+        timer_param=None,
     )
 
     # Return playback node + original nodes
@@ -277,13 +312,18 @@ async def playback(
     """Run nodes with playback from logs, optionally logging outputs.
 
     This convenience function automatically creates a playback graph for any
-    missing input channels and executes it.
+    missing input channels and executes it with appropriate timing.
+
+    For fast-forward mode (speed=inf), a VirtualClock is created and used
+    to coordinate time between the playback node and any nodes that use
+    Timer. This ensures deterministic ordering: timers scheduled for time T
+    fire before messages at time T are delivered.
 
     Args:
         nodes: List of async callables that consume channels.
         playback_dir: Directory containing log files to play back from.
         speed: Playback speed multiplier:
-               - float('inf') (default): As fast as possible
+               - float('inf') (default): Fast-forward (deterministic, ASAP)
                - 1.0: Realtime (respects original timestamps)
                - 2.0: Double speed
                - 0.5: Half speed
@@ -295,8 +335,11 @@ async def playback(
         ValueError: If channel configuration is invalid.
 
     Example:
-        >>> # Test new logic with recorded data
+        >>> # Test new logic with recorded data (fast-forward)
         >>> await playback([new_planner], Path("logs"))
+
+        >>> # Real-time playback
+        >>> await playback([new_planner], Path("logs"), speed=1.0)
 
         >>> # Slow motion playback for debugging
         >>> await playback([new_planner], Path("logs"), speed=0.5)
@@ -304,9 +347,22 @@ async def playback(
         >>> # Playback and log transformed outputs
         >>> await playback([transform], Path("logs"), log_dir=Path("processed"))
     """
-    graph = await create_playback_graph(nodes, playback_dir, speed=speed)
+    # Create timer based on speed
+    timer: Timer
+    clock: VirtualClock | None = None
+
+    if speed == float('inf'):
+        # Fast-forward mode: use virtual clock
+        clock = VirtualClock()
+        timer = FastForwardTimer(clock)
+    else:
+        # Scaled playback (including real-time at speed=1.0)
+        timer = ScaledTimer(speed)
+
+    graph = await create_playback_graph(nodes, playback_dir, speed=speed, clock=clock)
     
     if log_dir is not None:
         # Only log outputs from the user's nodes, not the playback node
         graph.append(create_logging_node(log_dir, nodes))
-    await run_nodes(graph)
+
+    await run_nodes(graph, timer=timer)

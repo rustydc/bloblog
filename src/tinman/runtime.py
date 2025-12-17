@@ -11,11 +11,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Annotated, Any, get_args, get_origin, get_type_hints
 
 from .oblog import Codec, PickleCodec
 from .pubsub import In, Out
+from .timer import Timer, ScaledTimer
 
 
 @dataclass
@@ -30,12 +31,14 @@ class NodeSpec:
         inputs: Maps parameter name -> (channel_name, queue_size)
         outputs: Maps parameter name -> (channel_name, codec)
         all_channels_param: Parameter name for dict[str, In] injection (or None)
+        timer_param: Parameter name for Timer injection (or None)
     """
 
     node_fn: Callable
     inputs: dict[str, tuple[str, int]]  # param_name -> (channel_name, queue_size)
     outputs: dict[str, tuple[str, Codec]]  # param_name -> (channel_name, codec)
     all_channels_param: str | None = None  # Parameter name for dict[str, In] injection
+    timer_param: str | None = None  # Parameter name for Timer injection
 
 
 class _ChannelRuntime[T]:
@@ -53,7 +56,7 @@ class _ChannelRuntime[T]:
 
 def _parse_node_signature(
     node_fn: Callable,
-) -> tuple[dict[str, tuple[str, int]], dict[str, tuple[str, Codec]], str | None]:
+) -> tuple[dict[str, tuple[str, int]], dict[str, tuple[str, Codec]], str | None, str | None]:
     """Parse a node function's signature to extract input/output channels.
 
     This is the core introspection function that understands the channel
@@ -61,15 +64,17 @@ def _parse_node_signature(
     - Annotated[In[T], "channel_name"] for inputs
     - Annotated[Out[T], "channel_name", codec] for outputs
     - dict[str, In] for all-channels injection (e.g., logging nodes)
+    - Timer for timer injection
 
     Args:
         node_fn: The node function or bound method to inspect.
 
     Returns:
-        (inputs, outputs, all_channels_param) where:
+        (inputs, outputs, all_channels_param, timer_param) where:
         - inputs maps param_name -> (channel_name, queue_size)
         - outputs maps param_name -> (channel_name, codec)
         - all_channels_param is the param name for dict[str, In] injection (or None)
+        - timer_param is the param name for Timer injection (or None)
 
     Raises:
         ValueError: If signature is invalid or codecs are missing from outputs.
@@ -80,6 +85,7 @@ def _parse_node_signature(
     inputs: dict[str, tuple[str, int]] = {}
     outputs: dict[str, tuple[str, Codec]] = {}
     all_channels_param: str | None = None
+    timer_param: str | None = None
 
     for param_name, _param in sig.parameters.items():
         if param_name == "self":
@@ -89,6 +95,16 @@ def _parse_node_signature(
             raise ValueError(f"Parameter '{param_name}' in {node_fn.__name__}() has no type hint")
 
         hint = hints[param_name]
+
+        # Check for Timer parameter
+        if hint is Timer or (get_origin(hint) is type and issubclass(get_args(hint)[0] if get_args(hint) else hint, Timer)):
+            if timer_param is not None:
+                raise ValueError(
+                    f"Node {node_fn.__name__}() has multiple Timer parameters: "
+                    f"'{timer_param}' and '{param_name}'"
+                )
+            timer_param = param_name
+            continue
 
         # Check for dict[str, In] (all channels injection)
         if get_origin(hint) is dict:
@@ -110,7 +126,7 @@ def _parse_node_signature(
             raise ValueError(
                 f"Parameter '{param_name}' in {node_fn.__name__}() "
                 f'must be Annotated[In[T], "channel"], '
-                f'Annotated[Out[T], "channel", codec], or dict[str, In]'
+                f'Annotated[Out[T], "channel", codec], dict[str, In], or Timer'
             )
 
         # Parse Annotated[In[T] | Out[T], channel_name, codec?]
@@ -168,7 +184,7 @@ def _parse_node_signature(
         else:
             raise ValueError(f"Parameter '{param_name}' must be In[T] or Out[T], got {base_type}")
 
-    return inputs, outputs, all_channels_param
+    return inputs, outputs, all_channels_param, timer_param
 
 
 def get_node_specs(nodes: Sequence[Callable | NodeSpec]) -> list[NodeSpec]:
@@ -203,8 +219,8 @@ def get_node_specs(nodes: Sequence[Callable | NodeSpec]) -> list[NodeSpec]:
             specs.append(node)
         else:
             # Parse callable
-            inputs, outputs, all_channels_param = _parse_node_signature(node)
-            specs.append(NodeSpec(node, inputs, outputs, all_channels_param))
+            inputs, outputs, all_channels_param, timer_param = _parse_node_signature(node)
+            specs.append(NodeSpec(node, inputs, outputs, all_channels_param, timer_param))
     return specs
 
 
@@ -229,8 +245,8 @@ def validate_nodes(nodes: Sequence[Callable | NodeSpec]) -> None:
             specs.append(node)
         else:
             # It's a callable - parse it
-            inputs, outputs, all_channels_param = _parse_node_signature(node)
-            specs.append(NodeSpec(node, inputs, outputs, all_channels_param))
+            inputs, outputs, all_channels_param, timer_param = _parse_node_signature(node)
+            specs.append(NodeSpec(node, inputs, outputs, all_channels_param, timer_param))
 
     output_channels: dict[str, str] = {}  # channel_name -> node_name
 
@@ -259,7 +275,10 @@ def validate_nodes(nodes: Sequence[Callable | NodeSpec]) -> None:
                 )
 
 
-async def run_nodes(nodes: Sequence[Callable[..., Awaitable[Any]] | NodeSpec]) -> None:
+async def run_nodes(
+    nodes: Sequence[Callable[..., Awaitable[Any]] | NodeSpec],
+    timer: Timer | None = None,
+) -> None:
     """Run a graph of nodes, wiring their channels and executing them concurrently.
 
     This is the core execution engine that wires together async nodes based on
@@ -271,6 +290,9 @@ async def run_nodes(nodes: Sequence[Callable[..., Awaitable[Any]] | NodeSpec]) -
                - Inputs: Annotated[In[T], "channel_name"]
                - Outputs: Annotated[Out[T], "channel_name", codec_instance]
                - All channels: dict[str, In] (for monitoring/logging nodes)
+               - Timer: Timer (for time access)
+        timer: Optional Timer instance to inject into nodes that request it.
+               If None, a default ScaledTimer (real-time) is created.
 
     Raises:
         TypeError: If nodes are not async callables.
@@ -278,16 +300,17 @@ async def run_nodes(nodes: Sequence[Callable[..., Awaitable[Any]] | NodeSpec]) -
 
     Example:
         >>> # Simple pipeline
-        >>> await run([producer, consumer])
+        >>> await run_nodes([producer, consumer])
 
-        >>> # With logging
-        >>> logger = create_logging_node(Path("logs"), codecs)
-        >>> await run([producer, consumer, logger])
-
-        >>> # With playback
-        >>> graph = await create_playback_graph([consumer], Path("logs"))
-        >>> await run(graph)
+        >>> # With custom timer
+        >>> clock = VirtualClock()
+        >>> timer = FastForwardTimer(clock)
+        >>> await run_nodes([producer, consumer], timer=timer)
     """
+    # Create default timer if not provided
+    if timer is None:
+        timer = ScaledTimer()
+
     # Validate all are async callables (or NodeSpec objects)
     for node in nodes:
         if isinstance(node, NodeSpec):
@@ -310,9 +333,10 @@ async def run_nodes(nodes: Sequence[Callable[..., Awaitable[Any]] | NodeSpec]) -
     validate_nodes(specs)
     
     # Build node info dictionary
-    node_info: dict[Callable, tuple[dict, dict, str | None, dict[str, Any]]] = {}  # (inputs, outputs, all_channels_param, kwargs)
+    # (inputs, outputs, all_channels_param, timer_param, kwargs)
+    node_info: dict[Callable, tuple[dict, dict, str | None, str | None, dict[str, Any]]] = {}
     for spec in specs:
-        node_info[spec.node_fn] = (spec.inputs, spec.outputs, spec.all_channels_param, {})
+        node_info[spec.node_fn] = (spec.inputs, spec.outputs, spec.all_channels_param, spec.timer_param, {})
 
     # Build runtime channels for all node outputs
     runtime_channels: dict[str, _ChannelRuntime] = {}
@@ -325,7 +349,7 @@ async def run_nodes(nodes: Sequence[Callable[..., Awaitable[Any]] | NodeSpec]) -
 
     # Pre-build kwargs for all nodes to avoid race conditions
     # All subscriptions must be created BEFORE any node starts running
-    for _node_fn, (inputs, outputs, all_channels_param, kwargs) in node_info.items():
+    for _node_fn, (inputs, outputs, all_channels_param, timer_param, kwargs) in node_info.items():
         for param_name, (channel_name, queue_size) in inputs.items():
             # Get the Out from runtime channels
             out = runtime_channels[channel_name].out
@@ -341,9 +365,13 @@ async def run_nodes(nodes: Sequence[Callable[..., Awaitable[Any]] | NodeSpec]) -
                 all_channels_dict[channel_name] = runtime.out.sub(maxsize=10)
             kwargs[all_channels_param] = all_channels_dict
 
+        # Handle Timer injection
+        if timer_param:
+            kwargs[timer_param] = timer
+
     async def run_node_and_close(node_fn: Callable) -> None:
         """Run a node and close its output channels when done."""
-        _, outputs, _, kwargs = node_info[node_fn]
+        _, outputs, _, _, kwargs = node_info[node_fn]
         try:
             await node_fn(**kwargs)
         finally:
