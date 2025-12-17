@@ -3,7 +3,10 @@ name = "tinman"
 version = "0.1.0"
 description = "A blob logging and pub/sub node framework"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["cyclopts>=3.0"]
+
+[project.scripts]
+tinman = "tinman.cli:main"
 
 [project.optional-dependencies]
 numpy = ["numpy>=1.24"]

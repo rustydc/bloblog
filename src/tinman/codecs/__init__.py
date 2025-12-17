@@ -29,10 +29,25 @@ from .composite import (
     StringCodec,
     TupleCodec,
 )
-from .numpy import NumpyArrayCodec
-from .pandas import DataFrameCodec, DataFrameParquetCodec
 from .protobuf import ProtobufCodec
-from .image import Image, ImageCodec
+
+# Optional: NumPy codec (requires numpy)
+try:
+    from .numpy import NumpyArrayCodec
+except ImportError:
+    pass
+
+# Optional: Pandas codecs (requires pandas)
+try:
+    from .pandas import DataFrameCodec, DataFrameParquetCodec
+except ImportError:
+    pass
+
+# Optional: Image codec (requires numpy)
+try:
+    from .image import Image, ImageCodec
+except ImportError:
+    pass
 
 # Optional: GeoPandas codec (requires geopandas)
 try:

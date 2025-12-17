@@ -1,14 +1,20 @@
 """Simple example demonstrating node running with logging and playback.
 
-Run with: uv run python -m examples.simple
+Usage:
+    # Run pipeline and log output
+    tinman run examples.simple:pipeline --log-dir logs/ --pickle
+
+    # Playback through consumer
+    tinman playback examples.simple:consumer --from logs/ --pickle
+
+    # Use factory to create configured node
+    tinman playback examples.simple:create_counter --from logs/ --pickle
 """
 
 import asyncio
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Annotated
 
-from tinman import In, Out, enable_pickle_codec, run, playback
+from tinman import In, Out
 
 
 # Example 1: Simple function node
@@ -43,6 +49,10 @@ async def consumer(
     print("Consumer: Done")
 
 
+# Pre-built pipeline for CLI usage
+pipeline = [producer, uppercase, consumer]
+
+
 # Example 4: Stateful class-based node
 class Counter:
     """Node with state."""
@@ -66,48 +76,7 @@ class Counter:
         print(f"Counter: Done ({self.count} messages)")
 
 
-async def main():
-    """Run example pipelines."""
-    enable_pickle_codec()
-
-    with TemporaryDirectory(delete=False) as log_dir:
-        log_path = Path(log_dir)
-
-        print("Example 1: Simple Pipeline (Producer -> Uppercase -> Consumer)")
-        print("-" * 70)
-
-        ex1_log = log_path / "ex1"
-        await run([producer, uppercase, consumer], log_dir=ex1_log)
-
-        print("\n\nExample 2: Playback with different processor")
-        print("-" * 70)
-
-        counter = Counter(prefix="Characters:")
-
-        # Consumer for counted messages
-        async def consumer2(input: Annotated[In[str], "counted"]):
-            async for msg in input:
-                print(f"Consumer2: {msg}")
-
-        # Playback "messages", run through counter (stateful), log "counted" output
-        ex2_log = log_path / "ex2"
-        await playback([counter.run, consumer2], playback_dir=ex1_log, log_dir=ex2_log, speed=1.0)
-
-        print("\n\nExample 3: Playback at 5.0x Speed")
-        print("-" * 70)
-
-        await playback([consumer2], playback_dir=ex2_log, speed=5.0)
-
-        print("\n\nExample 4: Playback at full speed")
-        print("-" * 70)
-
-        await playback([consumer2], playback_dir=ex2_log)
-
-        print("\n" + "=" * 70)
-        print("Done!")
-        print(f"Logs stored in: {log_path}")
-        print("=" * 70)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+# Factory function for CLI - creates configured Counter node
+def create_counter():
+    """Factory that creates a Counter node with custom prefix."""
+    return Counter(prefix="Characters:").run

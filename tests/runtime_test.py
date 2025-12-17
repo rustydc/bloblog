@@ -1,7 +1,7 @@
 """Tests for runtime module (core graph operations)."""
 
 import pytest
-from test_utils import StringCodec, make_consumer_node, make_producer_node
+from .test_utils import StringCodec, make_consumer_node, make_producer_node
 
 from tinman import In, Out, get_node_specs, validate_nodes
 from typing import Annotated

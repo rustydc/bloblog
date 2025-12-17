@@ -6,27 +6,23 @@ This example demonstrates:
 3. Using Timer for controlled frame rates
 4. Recording and playing back webcam data
 
-Run with: uv run --extra opencv python -m examples.webcam_sensor
-
-Example usage:
+Usage:
     # Record 5 seconds of webcam footage
-    python -m examples.webcam_sensor record
+    tinman run examples.webcam_sensor:record_pipeline --log-dir webcam_logs/
 
-    # Playback recorded footage (realtime)
-    python -m examples.webcam_sensor playback
+    # Playback recorded footage (realtime with display)
+    tinman playback examples.webcam_sensor:display_nodes --from webcam_logs/ --speed 1.0
 
-    # Playback at 2x speed
-    python -m examples.webcam_sensor playback --speed 2.0
+    # Playback stats only (fast-forward)
+    tinman playback examples.webcam_sensor:stats_nodes --from webcam_logs/
 """
 
 from __future__ import annotations
 
-import argparse
 import asyncio
-from pathlib import Path
 from typing import Annotated
 
-from tinman import In, Out, run, playback
+from tinman import In, Out
 from tinman.codecs import Image, ImageCodec
 from tinman.timer import Timer
 
@@ -251,110 +247,21 @@ async def frame_stats(
 
 
 # =============================================================================
-# Main
+# CLI-friendly exports
 # =============================================================================
 
 
-async def record_webcam(log_dir: Path, duration: float, fps: float) -> None:
-    """Record webcam footage to log files."""
-    sensor = WebcamSensor(fps=fps, duration=duration)
-    await run([sensor.run, frame_stats], log_dir=log_dir)
-    print(f"\n✅ Recording saved to {log_dir}")
+def create_sensor(fps: float = 30.0, duration: float = 5.0):
+    """Factory to create a webcam sensor node."""
+    return WebcamSensor(fps=fps, duration=duration).run
 
 
-async def playback_webcam(log_dir: Path, speed: float, show_display: bool) -> None:
-    """Playback recorded webcam footage."""
-    nodes = [frame_stats]
-    if show_display:
-        nodes.append(frame_display)
-
-    await playback(nodes, playback_dir=log_dir, speed=speed)
+def record_pipeline():
+    """Factory returning nodes for recording webcam footage."""
+    sensor = WebcamSensor(fps=30.0, duration=5.0)
+    return [sensor.run, frame_stats]
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Webcam sensor example")
-    subparsers = parser.add_subparsers(dest="command", help="Command to run")
-
-    # Record command
-    record_parser = subparsers.add_parser("record", help="Record webcam footage")
-    record_parser.add_argument(
-        "--log-dir",
-        type=Path,
-        default=Path("webcam_logs"),
-        help="Directory to save logs",
-    )
-    record_parser.add_argument(
-        "--duration",
-        type=float,
-        default=5.0,
-        help="Recording duration in seconds",
-    )
-    record_parser.add_argument(
-        "--fps",
-        type=float,
-        default=30.0,
-        help="Target frame rate",
-    )
-
-    # Playback command
-    playback_parser = subparsers.add_parser("playback", help="Playback recorded footage")
-    playback_parser.add_argument(
-        "--log-dir",
-        type=Path,
-        default=Path("webcam_logs"),
-        help="Directory containing logs",
-    )
-    playback_parser.add_argument(
-        "--speed",
-        type=float,
-        default=1.0,
-        help="Playback speed (1.0 = realtime, inf = fast-forward)",
-    )
-    playback_parser.add_argument(
-        "--no-display",
-        action="store_true",
-        help="Don't show video display",
-    )
-
-    # Demo command (record + playback)
-    demo_parser = subparsers.add_parser("demo", help="Record then playback")
-    demo_parser.add_argument(
-        "--duration",
-        type=float,
-        default=3.0,
-        help="Recording duration in seconds",
-    )
-
-    args = parser.parse_args()
-
-    if args.command == "record":
-        asyncio.run(record_webcam(args.log_dir, args.duration, args.fps))
-
-    elif args.command == "playback":
-        speed = float("inf") if args.speed == float("inf") else args.speed
-        asyncio.run(playback_webcam(args.log_dir, speed, not args.no_display))
-
-    elif args.command == "demo":
-        from tempfile import TemporaryDirectory
-
-        async def demo():
-            with TemporaryDirectory() as tmpdir:
-                log_dir = Path(tmpdir)
-                print("=" * 60)
-                print("Recording webcam...")
-                print("=" * 60)
-                await record_webcam(log_dir, args.duration, fps=15.0)
-
-                print("\n" + "=" * 60)
-                print("Playing back at 2x speed...")
-                print("=" * 60)
-                await playback_webcam(log_dir, speed=2.0, show_display=True)
-
-        asyncio.run(demo())
-
-    else:
-        parser.print_help()
-
-
-if __name__ == "__main__":
-    main()
+# Nodes for playback (consume camera channel)
+stats_nodes = [frame_stats]
+display_nodes = [frame_stats, frame_display]

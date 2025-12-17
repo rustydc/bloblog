@@ -5,7 +5,7 @@ import time
 from typing import Annotated
 
 import pytest
-from test_utils import StringCodec, make_consumer_node, make_producer_node, make_transform_node
+from .test_utils import StringCodec, make_consumer_node, make_producer_node, make_transform_node
 
 from tinman import In, Out, ObLog, get_node_specs, run
 from tinman.launcher import create_logging_node, create_playback_graph
