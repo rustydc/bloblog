@@ -32,6 +32,7 @@ from .composite import (
 from .numpy import NumpyArrayCodec
 from .pandas import DataFrameCodec, DataFrameParquetCodec
 from .protobuf import ProtobufCodec
+from .image import Image, ImageCodec
 
 # Optional: GeoPandas codec (requires geopandas)
 try:
@@ -44,6 +45,9 @@ __all__ = [
     "NumpyArrayCodec",
     "DataFrameCodec",
     "DataFrameParquetCodec",
+    # Image codec for video/camera data
+    "Image",
+    "ImageCodec",
     # GeoPandas codec (optional)
     "GeoDataFrameCodec",
     # Protocol Buffer codec

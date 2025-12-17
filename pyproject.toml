@@ -9,6 +9,11 @@ dependencies = []
 numpy = ["numpy>=1.24"]
 pandas = ["numpy>=1.24", "pandas>=2.0"]
 geopandas = ["numpy>=1.24", "pandas>=2.0", "geopandas>=0.14", "pyarrow>=14.0"]
+opencv = [
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+    "pyglet>=2.1.11",
+]
 
 [dependency-groups]
 dev = [
