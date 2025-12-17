@@ -4,12 +4,14 @@ Usage:
     tinman run module:node1,node2 other_module:node3 --log-dir logs/
     tinman playback module:consumer --from logs/ --speed 2.0
     tinman playback module:consumer --from logs/  # fast-forward (default)
+    tinman run myapp:nodes --log-dir logs/ --capture-logs  # capture Python logs
 """
 
 from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -21,6 +23,7 @@ from .launcher import playback as _playback
 from .launcher import run as _run
 from .runtime import NodeSpec
 from .oblog import enable_pickle_codec
+from .logging import log_capture_context
 
 app = cyclopts.App(
     name="tinman",
@@ -166,6 +169,9 @@ def run(
     *,
     log_dir: Path | None = None,
     pickle: bool = False,
+    capture_logs: bool = True,
+    log_level: str = "INFO",
+    log_channel: str = "logs",
 ) -> None:
     """Run a node graph.
 
@@ -178,16 +184,29 @@ def run(
         Directory to log all output channels.
     pickle
         Enable PickleCodec for arbitrary Python objects (security risk with untrusted data).
+    capture_logs
+        Capture Python logging output to a channel. Adds a handler to the root logger
+        and includes a log capture node in the graph.
+    log_level
+        Minimum log level to capture when --capture-logs is enabled.
+        One of: DEBUG, INFO, WARNING, ERROR, CRITICAL. Default: INFO.
+    log_channel
+        Channel name for captured logs. Default: "logs".
 
     Examples
     --------
     $ tinman run myapp.nodes:producer,consumer
     $ tinman run myapp.sensors:camera myapp.processors:detector --log-dir logs/
+    $ tinman run myapp:nodes --log-dir logs/ --capture-logs
+    $ tinman run myapp:nodes --log-dir logs/ --capture-logs --log-level DEBUG
     """
     if pickle:
         enable_pickle_codec()
     node_list = load_nodes(nodes)
-    asyncio.run(_run(node_list, log_dir=log_dir))  # type: ignore[arg-type]
+    
+    level = getattr(logging, log_level.upper(), logging.INFO)
+    with log_capture_context(capture_logs, channel=log_channel, level=level) as log_nodes:
+        asyncio.run(_run([*node_list, *log_nodes], log_dir=log_dir))  # type: ignore[arg-type]
 
 
 @app.command
@@ -198,6 +217,10 @@ def playback(
     speed: float = float("inf"),
     log_dir: Path | None = None,
     pickle: bool = False,
+    capture_logs: bool = True,
+    log_level: str = "INFO",
+    log_channel: str = "logs",
+    use_virtual_time: bool = True,
 ) -> None:
     """Play back recorded logs through nodes.
 
@@ -215,17 +238,43 @@ def playback(
         Directory to log output channels (for recording transformed data).
     pickle
         Enable PickleCodec for arbitrary Python objects (security risk with untrusted data).
+    capture_logs
+        Capture Python logging output to a channel. Adds a handler to the root logger
+        and includes a log capture node in the graph.
+    log_level
+        Minimum log level to capture when --capture-logs is enabled.
+        One of: DEBUG, INFO, WARNING, ERROR, CRITICAL. Default: INFO.
+    log_channel
+        Channel name for captured logs. Default: "logs".
+    use_virtual_time
+        Use virtual/scaled time for Python logging timestamps. When enabled,
+        log messages will have timestamps matching the playback time rather
+        than wall clock time. Default: True.
 
     Examples
     --------
     $ tinman playback myapp:consumer --from logs/
     $ tinman playback myapp:consumer --from logs/ --speed 1.0
     $ tinman playback myapp:transform --from logs/ --log-dir processed/
+    $ tinman playback myapp:consumer --from logs/ --capture-logs
     """
     if pickle:
         enable_pickle_codec()
     node_list = load_nodes(nodes)
-    asyncio.run(_playback(node_list, playback_dir=from_, speed=speed, log_dir=log_dir))  # type: ignore[arg-type]
+    
+    level = getattr(logging, log_level.upper(), logging.INFO)
+    with log_capture_context(
+        capture_logs,
+        channel=log_channel,
+        level=level,
+        use_virtual_time=use_virtual_time,
+    ) as log_nodes:
+        asyncio.run(_playback(
+            [*node_list, *log_nodes],
+            playback_dir=from_,
+            speed=speed,
+            log_dir=log_dir,
+        ))  # type: ignore[arg-type]
 
 
 def main() -> None:

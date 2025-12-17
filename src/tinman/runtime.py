@@ -32,6 +32,9 @@ class NodeSpec:
         outputs: Maps parameter name -> (channel_name, codec)
         all_channels_param: Parameter name for dict[str, In] injection (or None)
         timer_param: Parameter name for Timer injection (or None)
+        daemon: If True, node is cancelled when all non-daemon nodes complete.
+                Useful for auxiliary nodes like log capture that should not
+                block shutdown.
     """
 
     node_fn: Callable
@@ -39,6 +42,24 @@ class NodeSpec:
     outputs: dict[str, tuple[str, Codec]]  # param_name -> (channel_name, codec)
     all_channels_param: str | None = None  # Parameter name for dict[str, In] injection
     timer_param: str | None = None  # Parameter name for Timer injection
+    daemon: bool = False  # If True, cancelled when non-daemon nodes complete
+
+
+def daemon[F: Callable](node_fn: F) -> F:
+    """Mark a node function as a daemon.
+    
+    Daemon nodes are cancelled when all non-daemon nodes complete.
+    Use this for auxiliary nodes like log consumers that should not
+    block shutdown.
+    
+    Example:
+        >>> @daemon
+        ... async def log_printer(logs: Annotated[In[LogEntry], "logs"]):
+        ...     async for entry in logs:
+        ...         print(entry.message)
+    """
+    node_fn._tinman_daemon = True  # type: ignore[attr-defined]
+    return node_fn
 
 
 class _ChannelRuntime[T]:
@@ -220,7 +241,8 @@ def get_node_specs(nodes: Sequence[Callable | NodeSpec]) -> list[NodeSpec]:
         else:
             # Parse callable
             inputs, outputs, all_channels_param, timer_param = _parse_node_signature(node)
-            specs.append(NodeSpec(node, inputs, outputs, all_channels_param, timer_param))
+            is_daemon = getattr(node, '_tinman_daemon', False)
+            specs.append(NodeSpec(node, inputs, outputs, all_channels_param, timer_param, is_daemon))
     return specs
 
 
@@ -374,12 +396,47 @@ async def run_nodes(
         _, outputs, _, _, kwargs = node_info[node_fn]
         try:
             await node_fn(**kwargs)
+        except asyncio.CancelledError:
+            # Re-raise after closing outputs
+            raise
         finally:
             # Close output channels
             for _param_name, (channel_name, _) in outputs.items():
                 await runtime_channels[channel_name].out.close()
 
-    # Execute all nodes concurrently
-    async with asyncio.TaskGroup() as tg:
-        for spec in specs:
-            tg.create_task(run_node_and_close(spec.node_fn))
+    # Separate daemon and non-daemon nodes
+    daemon_specs = [s for s in specs if s.daemon]
+    main_specs = [s for s in specs if not s.daemon]
+
+    # Execute nodes: daemons are cancelled when main nodes complete
+    daemon_tasks: list[asyncio.Task] = []
+    
+    async def cancel_daemon_tasks():
+        """Cancel daemons after main nodes complete."""
+        for task in daemon_tasks:
+            if not task.done():
+                task.cancel()
+        if daemon_tasks:
+            await asyncio.gather(*daemon_tasks, return_exceptions=True)
+
+    try:
+        # Start daemon nodes
+        for spec in daemon_specs:
+            task = asyncio.create_task(run_node_and_close(spec.node_fn))
+            daemon_tasks.append(task)
+
+        # Run main nodes to completion
+        if main_specs:
+            async with asyncio.TaskGroup() as tg:
+                for spec in main_specs:
+                    tg.create_task(run_node_and_close(spec.node_fn))
+        
+        # Main nodes done - cancel daemons
+        await cancel_daemon_tasks()
+    except BaseException:
+        # On any error, ensure we clean up
+        for task in daemon_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*daemon_tasks, return_exceptions=True)
+        raise

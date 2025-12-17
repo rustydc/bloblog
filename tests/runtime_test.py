@@ -1,9 +1,11 @@
 """Tests for runtime module (core graph operations)."""
 
+import asyncio
 import pytest
 from .test_utils import StringCodec, make_consumer_node, make_producer_node
 
 from tinman import In, Out, get_node_specs, validate_nodes
+from tinman.oblog import PickleCodec
 from typing import Annotated
 
 
@@ -209,3 +211,70 @@ class TestTimerInjection:
         await run_nodes([timed_producer, consumer], timer=timer)
         
         assert sleep_completed
+
+
+class TestDaemonNodes:
+    @pytest.mark.asyncio
+    async def test_daemon_node_cancelled_when_main_completes(self):
+        """Test that daemon nodes are cancelled when main nodes complete."""
+        from tinman.runtime import run_nodes, NodeSpec
+        from tinman.oblog import PickleCodec
+        
+        daemon_cancelled = False
+        main_completed = False
+        
+        async def main_node(out: Annotated[Out[str], "data", StringCodec()]) -> None:
+            nonlocal main_completed
+            await out.publish("hello")
+            main_completed = True
+        
+        async def daemon_node(out: Annotated[Out[str], "daemon_data", StringCodec()]) -> None:
+            nonlocal daemon_cancelled
+            try:
+                while True:
+                    await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                daemon_cancelled = True
+                raise
+        
+        daemon_spec = NodeSpec(
+            node_fn=daemon_node,
+            inputs={},
+            outputs={"out": ("daemon_data", StringCodec())},
+            daemon=True,
+        )
+        
+        consumer, _ = make_consumer_node("data", 1)
+        await run_nodes([main_node, consumer, daemon_spec])
+        
+        assert main_completed
+        assert daemon_cancelled
+
+    @pytest.mark.asyncio
+    async def test_daemon_decorator(self):
+        """Test that @daemon decorator marks nodes as daemons."""
+        from tinman.runtime import run_nodes, daemon
+        
+        daemon_cancelled = False
+        main_completed = False
+        
+        async def main_node(out: Annotated[Out[str], "data", StringCodec()]) -> None:
+            nonlocal main_completed
+            await out.publish("hello")
+            main_completed = True
+        
+        @daemon
+        async def my_daemon(out: Annotated[Out[str], "daemon_data", StringCodec()]) -> None:
+            nonlocal daemon_cancelled
+            try:
+                while True:
+                    await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                daemon_cancelled = True
+                raise
+        
+        consumer, _ = make_consumer_node("data", 1)
+        await run_nodes([main_node, consumer, my_daemon])
+        
+        assert main_completed
+        assert daemon_cancelled

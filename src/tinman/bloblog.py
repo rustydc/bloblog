@@ -135,9 +135,19 @@ class BlobLog:
 
 
 def _close_mmap(mv: memoryview, mm: mmap.mmap, f: BinaryIO) -> None:
-    """Weak reference callback to close mmap resources."""
-    mv.release()
-    mm.close()
+    """Weak reference callback to close mmap resources.
+    
+    Silently handles BufferError if derived views still exist, as this
+    can happen during error unwinding when slices haven't been released yet.
+    """
+    try:
+        mv.release()
+    except BufferError:
+        pass  # Derived views still exist, they'll clean up eventually
+    try:
+        mm.close()
+    except BufferError:
+        pass  # mmap still has exported pointers
     f.close()
 
 

@@ -5,6 +5,7 @@ from .oblog import enable_pickle_codec as enable_pickle_codec
 from .pubsub import In as In
 from .pubsub import Out as Out
 from .runtime import NodeSpec as NodeSpec
+from .runtime import daemon as daemon
 from .runtime import get_node_specs as get_node_specs
 from .runtime import validate_nodes as validate_nodes
 from .launcher import create_logging_node as create_logging_node
@@ -16,6 +17,16 @@ from .timer import ScaledTimer as ScaledTimer
 from .timer import FastForwardTimer as FastForwardTimer
 from .timer import VirtualClock as VirtualClock
 from .timer import create_timer as create_timer
+
+# Logging integration
+from .logging import LogEntry as LogEntry
+from .logging import LogEntryCodec as LogEntryCodec
+from .logging import LogHandler as LogHandler
+from .logging import create_log_capture_node as create_log_capture_node
+from .logging import install_timer_log_factory as install_timer_log_factory
+from .logging import uninstall_timer_log_factory as uninstall_timer_log_factory
+from .logging import timer_log_context as timer_log_context
+from .logging import log_capture_context as log_capture_context
 
 # Codecs
 from . import codecs as codecs

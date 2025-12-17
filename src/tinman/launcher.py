@@ -33,8 +33,8 @@ def create_logging_node(
     log_dir: Path,
     nodes: list[Callable[..., Awaitable[None]] | NodeSpec] | None = None,
     channel_filter: set[str] | None = None
-) -> Callable:
-    """Create a node that logs all channels to disk.
+) -> NodeSpec:
+    """Create a daemon node that logs all channels to disk.
 
     Args:
         log_dir: Directory to write log files.
@@ -43,7 +43,7 @@ def create_logging_node(
         channel_filter: If provided, only log these channels. If None, log all.
 
     Returns:
-        An async node function that can be passed to run().
+        A NodeSpec (daemon) that can be passed to run().
 
     Example:
         >>> # Extract codecs from nodes automatically
@@ -56,7 +56,8 @@ def create_logging_node(
 
     Note:
         The created node will automatically receive all output channels via
-        the dict[str, In] injection mechanism.
+        the dict[str, In] injection mechanism. It's marked as a daemon so it
+        won't block shutdown when other nodes complete.
     """
     
     # Extract codecs from nodes if provided
@@ -102,7 +103,13 @@ def create_logging_node(
         finally:
             await oblog.close()
 
-    return logging_node
+    return NodeSpec(
+        node_fn=logging_node,
+        inputs={},
+        outputs={},
+        all_channels_param="channels",
+        daemon=True,
+    )
 
 
 async def create_playback_graph(
