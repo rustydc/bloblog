@@ -84,6 +84,56 @@ class TestLogEntry:
         assert "myapp.module" in formatted
         assert "Something happened" in formatted
 
+    def test_format_with_node_name(self):
+        """Test formatting with node_name placeholder."""
+        entry = LogEntry(
+            timestamp_ns=1000000000,
+            level=logging.INFO,
+            name="myapp",
+            message="Hello",
+            node_name="my_producer",
+        )
+        
+        formatted = entry.format("[%(node_name)s] %(levelname)s: %(message)s")
+        assert formatted == "[my_producer] INFO: Hello"
+
+    def test_from_record_captures_node_name(self):
+        """Test that from_record captures the current node name."""
+        from tinman.runtime import _current_node_name
+        
+        # Simulate being inside a node
+        token = _current_node_name.set("test_node")
+        try:
+            record = logging.LogRecord(
+                name="test.logger",
+                level=logging.INFO,
+                pathname="/path/to/file.py",
+                lineno=42,
+                msg="Hello",
+                args=(),
+                exc_info=None,
+            )
+            
+            entry = LogEntry.from_record(record)
+            assert entry.node_name == "test_node"
+        finally:
+            _current_node_name.reset(token)
+
+    def test_from_record_node_name_none_outside_node(self):
+        """Test that node_name is None when not in a node context."""
+        record = logging.LogRecord(
+            name="test.logger",
+            level=logging.INFO,
+            pathname="/path/to/file.py",
+            lineno=42,
+            msg="Hello",
+            args=(),
+            exc_info=None,
+        )
+        
+        entry = LogEntry.from_record(record)
+        assert entry.node_name is None
+
 
 class TestLogEntryCodec:
     """Tests for LogEntryCodec serialization."""
@@ -100,6 +150,7 @@ class TestLogEntryCodec:
             lineno=123,
             func_name="test_function",
             exc_text=None,
+            node_name="my_node",
         )
         
         encoded = codec.encode(entry)
@@ -113,6 +164,7 @@ class TestLogEntryCodec:
         assert decoded.lineno == entry.lineno
         assert decoded.func_name == entry.func_name
         assert decoded.exc_text == entry.exc_text
+        assert decoded.node_name == entry.node_name
 
     def test_encode_decode_with_none_fields(self):
         """Test encode/decode with optional fields as None."""
@@ -126,6 +178,7 @@ class TestLogEntryCodec:
             lineno=0,
             func_name=None,
             exc_text=None,
+            node_name=None,
         )
         
         decoded = codec.decode(codec.encode(entry))
@@ -133,6 +186,7 @@ class TestLogEntryCodec:
         assert decoded.pathname is None
         assert decoded.func_name is None
         assert decoded.exc_text is None
+        assert decoded.node_name is None
 
     def test_encode_decode_with_exception(self):
         """Test encode/decode with exception text."""

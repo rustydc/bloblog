@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Annotated, Callable
 
 from .oblog import Codec
 from .pubsub import Out
-from .runtime import NodeSpec
+from .runtime import NodeSpec, get_current_node_name
 from .timer import Timer
 
 
@@ -58,6 +58,8 @@ class LogEntry:
         lineno: Line number in source file
         func_name: Function name (may be None)
         exc_text: Formatted exception text (may be None)
+        node_name: Name of the tinman node that emitted this log (may be None
+                   if logged outside of node execution)
     """
     timestamp_ns: int
     level: int
@@ -67,6 +69,7 @@ class LogEntry:
     lineno: int = 0
     func_name: str | None = None
     exc_text: str | None = None
+    node_name: str | None = None
     
     @classmethod
     def from_record(cls, record: logging.LogRecord) -> LogEntry:
@@ -98,6 +101,7 @@ class LogEntry:
             lineno=record.lineno,
             func_name=record.funcName,
             exc_text=exc_text,
+            node_name=get_current_node_name(),
         )
     
     def format(self, fmt: str = "%(levelname)s:%(name)s:%(message)s") -> str:
@@ -105,6 +109,8 @@ class LogEntry:
         
         Args:
             fmt: Format string using logging-style placeholders.
+                 Supports: levelname, name, message, pathname, lineno,
+                 funcName, node_name
             
         Returns:
             Formatted log string.
@@ -117,6 +123,7 @@ class LogEntry:
             "pathname": self.pathname or "",
             "lineno": self.lineno,
             "funcName": self.func_name or "",
+            "node_name": self.node_name or "",
         }
         if self.exc_text:
             result = f"{result}\n{self.exc_text}"
@@ -135,14 +142,16 @@ class LogEntryCodec(Codec[LogEntry]):
         - pathname_len: uint32 (4 bytes, 0 = None)
         - func_name_len: uint32 (4 bytes, 0 = None)
         - exc_text_len: uint32 (4 bytes, 0 = None)
+        - node_name_len: uint32 (4 bytes, 0 = None)
         - name: bytes
         - message: bytes
         - pathname: bytes (if present)
         - func_name: bytes (if present)
         - exc_text: bytes (if present)
+        - node_name: bytes (if present)
     """
     
-    _HEADER = struct.Struct("<qiiIIIII")  # 40 bytes header
+    _HEADER = struct.Struct("<qiiIIIIII")  # 44 bytes header (added node_name_len)
     
     def encode(self, item: LogEntry) -> bytes:
         name_bytes = item.name.encode("utf-8")
@@ -150,6 +159,7 @@ class LogEntryCodec(Codec[LogEntry]):
         pathname_bytes = item.pathname.encode("utf-8") if item.pathname else b""
         func_name_bytes = item.func_name.encode("utf-8") if item.func_name else b""
         exc_text_bytes = item.exc_text.encode("utf-8") if item.exc_text else b""
+        node_name_bytes = item.node_name.encode("utf-8") if item.node_name else b""
         
         header = self._HEADER.pack(
             item.timestamp_ns,
@@ -160,9 +170,10 @@ class LogEntryCodec(Codec[LogEntry]):
             len(pathname_bytes),
             len(func_name_bytes),
             len(exc_text_bytes),
+            len(node_name_bytes),
         )
         
-        return header + name_bytes + message_bytes + pathname_bytes + func_name_bytes + exc_text_bytes
+        return header + name_bytes + message_bytes + pathname_bytes + func_name_bytes + exc_text_bytes + node_name_bytes
     
     def decode(self, data: bytes | memoryview) -> LogEntry:
         if isinstance(data, memoryview):
@@ -177,6 +188,7 @@ class LogEntryCodec(Codec[LogEntry]):
             pathname_len,
             func_name_len,
             exc_text_len,
+            node_name_len,
         ) = self._HEADER.unpack_from(data, 0)
         
         offset = self._HEADER.size
@@ -189,6 +201,8 @@ class LogEntryCodec(Codec[LogEntry]):
         func_name = data[offset:offset + func_name_len].decode("utf-8") if func_name_len else None
         offset += func_name_len
         exc_text = data[offset:offset + exc_text_len].decode("utf-8") if exc_text_len else None
+        offset += exc_text_len
+        node_name = data[offset:offset + node_name_len].decode("utf-8") if node_name_len else None
         
         return LogEntry(
             timestamp_ns=timestamp_ns,
@@ -199,6 +213,7 @@ class LogEntryCodec(Codec[LogEntry]):
             lineno=lineno,
             func_name=func_name,
             exc_text=exc_text,
+            node_name=node_name,
         )
 
 
@@ -622,7 +637,10 @@ def create_log_printer(channel: str = "logs") -> NodeSpec:
             text.append(time_str, style="dim")
             text.append(" ")
             text.append(f"[{level_name:8}]", style=style)
-            text.append(f" {entry.name}: {entry.message}")
+            text.append(" ")
+            if entry.node_name:
+                text.append(f"[{entry.node_name}] ", style="cyan")
+            text.append(f"{entry.name}: {entry.message}")
             console.print(text)
             
             if entry.exc_text:

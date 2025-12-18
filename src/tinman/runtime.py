@@ -27,12 +27,35 @@ import asyncio
 import inspect
 import signal
 from collections.abc import Awaitable, Callable, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Annotated, Any, get_args, get_origin, get_type_hints
 
 from .oblog import Codec, PickleCodec
 from .pubsub import In, Out
 from .timer import Timer, ScaledTimer
+
+
+# ContextVar for tracking the currently executing node's name
+_current_node_name: ContextVar[str | None] = ContextVar("current_node_name", default=None)
+
+
+def get_current_node_name() -> str | None:
+    """Get the name of the currently executing node.
+    
+    Returns the node name when called from within a running node,
+    or None if called outside of node execution.
+    
+    This can be useful for logging, debugging, or conditional behavior
+    based on which node is running.
+    
+    Example:
+        >>> async def my_node(input: Annotated[In[str], "data"]) -> None:
+        ...     print(f"Running in node: {get_current_node_name()}")
+        ...     async for item in input:
+        ...         process(item)
+    """
+    return _current_node_name.get()
 
 
 # Default timeout for graceful shutdown before force-cancelling
@@ -56,6 +79,9 @@ class NodeSpec:
                 Useful for auxiliary nodes like log capture that should not
                 block shutdown. Daemon nodes are also cancelled on external
                 shutdown (SIGINT/SIGTERM) along with all other nodes.
+        name: Human-readable name for the node. If None, auto-derived from
+              the function name. Used in error messages, logging context,
+              and for selective playback.
     """
 
     node_fn: Callable
@@ -64,6 +90,7 @@ class NodeSpec:
     all_channels_param: str | None = None  # Parameter name for dict[str, In] injection
     timer_param: str | None = None  # Parameter name for Timer injection
     daemon: bool = False  # If True, cancelled when non-daemon nodes complete
+    name: str | None = None  # Human-readable name (auto-derived if None)
 
 
 class ShutdownRequested(Exception):
@@ -255,7 +282,7 @@ def get_node_specs(nodes: Sequence[Callable | NodeSpec]) -> list[NodeSpec]:
                NodeSpec objects are passed through as-is (useful for synthetic nodes).
 
     Returns:
-        List of NodeSpec objects, one per node.
+        List of NodeSpec objects, one per node, with unique names assigned.
 
     Raises:
         ValueError: If signature is invalid or codecs are missing.
@@ -263,8 +290,7 @@ def get_node_specs(nodes: Sequence[Callable | NodeSpec]) -> list[NodeSpec]:
     Example:
         >>> specs = get_node_specs([producer, consumer])
         >>> for spec in specs:
-        ...     for _, (ch, codec) in spec.outputs.items():
-        ...         print(f"{spec.node_fn.__name__} produces {ch}")
+        ...     print(f"{spec.name} produces {list(spec.outputs.values())}")
     """
     specs = []
     for node in nodes:
@@ -276,7 +302,50 @@ def get_node_specs(nodes: Sequence[Callable | NodeSpec]) -> list[NodeSpec]:
             inputs, outputs, all_channels_param, timer_param = _parse_node_signature(node)
             is_daemon = getattr(node, '_tinman_daemon', False)
             specs.append(NodeSpec(node, inputs, outputs, all_channels_param, timer_param, is_daemon))
+    
+    # Assign unique names to all specs
+    _assign_unique_names(specs)
     return specs
+
+
+def _assign_unique_names(specs: list[NodeSpec]) -> None:
+    """Assign unique names to specs that don't have one.
+    
+    Names are derived from the function name. If multiple specs have the same
+    derived name, they are disambiguated with _1, _2, etc. suffixes.
+    
+    Args:
+        specs: List of NodeSpec objects to assign names to (modified in place).
+    """
+    # First pass: collect base names and count occurrences
+    base_name_counts: dict[str, int] = {}
+    base_names: list[str] = []
+    
+    for spec in specs:
+        if spec.name is not None:
+            # User-provided name - use as-is
+            base_name = spec.name
+        else:
+            # Derive from function name
+            base_name = spec.node_fn.__name__
+        base_names.append(base_name)
+        base_name_counts[base_name] = base_name_counts.get(base_name, 0) + 1
+    
+    # Second pass: assign unique names
+    # Track how many of each base name we've seen so far
+    base_name_seen: dict[str, int] = {}
+    
+    for i, spec in enumerate(specs):
+        base_name = base_names[i]
+        
+        if base_name_counts[base_name] == 1:
+            # Unique name, no suffix needed
+            spec.name = base_name
+        else:
+            # Need to disambiguate
+            seen = base_name_seen.get(base_name, 0)
+            base_name_seen[base_name] = seen + 1
+            spec.name = f"{base_name}_{seen + 1}"
 
 
 def validate_nodes(nodes: Sequence[Callable | NodeSpec]) -> None:
@@ -407,10 +476,12 @@ async def run_nodes(
     validate_nodes(specs)
     
     # Build node info dictionary
-    # (inputs, outputs, all_channels_param, timer_param, kwargs)
-    node_info: dict[Callable, tuple[dict, dict, str | None, str | None, dict[str, Any]]] = {}
+    # (name, inputs, outputs, all_channels_param, timer_param, kwargs)
+    # Note: spec.name is always set by get_node_specs via _assign_unique_names
+    node_info: dict[Callable, tuple[str, dict, dict, str | None, str | None, dict[str, Any]]] = {}
     for spec in specs:
-        node_info[spec.node_fn] = (spec.inputs, spec.outputs, spec.all_channels_param, spec.timer_param, {})
+        assert spec.name is not None  # Guaranteed by _assign_unique_names
+        node_info[spec.node_fn] = (spec.name, spec.inputs, spec.outputs, spec.all_channels_param, spec.timer_param, {})
 
     # Build runtime channels for all node outputs
     runtime_channels: dict[str, _ChannelRuntime] = {}
@@ -423,7 +494,7 @@ async def run_nodes(
 
     # Pre-build kwargs for all nodes to avoid race conditions
     # All subscriptions must be created BEFORE any node starts running
-    for _node_fn, (inputs, outputs, all_channels_param, timer_param, kwargs) in node_info.items():
+    for _node_fn, (_name, inputs, outputs, all_channels_param, timer_param, kwargs) in node_info.items():
         for param_name, (channel_name, queue_size) in inputs.items():
             # Get the Out from runtime channels
             out = runtime_channels[channel_name].out
@@ -445,13 +516,16 @@ async def run_nodes(
 
     async def run_node_and_close(node_fn: Callable) -> None:
         """Run a node and close its output channels when done."""
-        _, outputs, _, _, kwargs = node_info[node_fn]
+        node_name, _, outputs, _, _, kwargs = node_info[node_fn]
+        # Set the contextvar so the node can access its name
+        token = _current_node_name.set(node_name)
         try:
             await node_fn(**kwargs)
         except asyncio.CancelledError:
             # Re-raise after closing outputs
             raise
         finally:
+            _current_node_name.reset(token)
             # Close output channels
             for _param_name, (channel_name, _) in outputs.items():
                 await runtime_channels[channel_name].out.close()

@@ -51,6 +51,78 @@ class TestGetNodeSpecs:
         assert len(specs[0].inputs) == 0
         assert len(specs[0].outputs) == 0
 
+    def test_assigns_unique_names(self):
+        """Test that get_node_specs assigns unique names to nodes."""
+        async def producer(out: Annotated[Out[str], "data", StringCodec()]) -> None:
+            pass
+        
+        async def consumer(inp: Annotated[In[str], "data"]) -> None:
+            pass
+        
+        specs = get_node_specs([producer, consumer])
+        
+        assert specs[0].name == "producer"
+        assert specs[1].name == "consumer"
+
+    def test_disambiguates_duplicate_names(self):
+        """Test that duplicate function names get _1, _2 suffixes."""
+        async def worker(out: Annotated[Out[str], "data1", StringCodec()]) -> None:
+            pass
+        
+        # Create lambdas with same __name__ by reassigning
+        worker1 = worker
+        
+        async def worker(out: Annotated[Out[str], "data2", StringCodec()]) -> None:
+            pass
+        worker2 = worker
+        
+        async def worker(out: Annotated[Out[str], "data3", StringCodec()]) -> None:
+            pass
+        worker3 = worker
+        
+        specs = get_node_specs([worker1, worker2, worker3])
+        
+        assert specs[0].name == "worker_1"
+        assert specs[1].name == "worker_2"
+        assert specs[2].name == "worker_3"
+
+    def test_preserves_explicit_names(self):
+        """Test that explicit names in NodeSpec are preserved."""
+        from tinman import NodeSpec
+        
+        async def my_func(out: Annotated[Out[str], "data", StringCodec()]) -> None:
+            pass
+        
+        spec = NodeSpec(
+            node_fn=my_func,
+            inputs={},
+            outputs={"out": ("data", StringCodec())},
+            name="custom_name"
+        )
+        
+        specs = get_node_specs([spec])
+        assert specs[0].name == "custom_name"
+
+    def test_disambiguates_mixed_explicit_and_derived(self):
+        """Test disambiguation when explicit names conflict with derived names."""
+        from tinman import NodeSpec
+        
+        async def worker(out: Annotated[Out[str], "data1", StringCodec()]) -> None:
+            pass
+        
+        explicit_spec = NodeSpec(
+            node_fn=worker,
+            inputs={},
+            outputs={"out": ("data2", StringCodec())},
+            name="worker"  # Same as derived name
+        )
+        
+        specs = get_node_specs([worker, explicit_spec])
+        
+        # Both have base name "worker", so both get suffixes
+        assert specs[0].name == "worker_1"
+        assert specs[1].name == "worker_2"
+
 
 class TestValidateNodes:
     def test_valid_simple_pipeline(self):
@@ -211,6 +283,68 @@ class TestTimerInjection:
         await run_nodes([timed_producer, consumer], timer=timer)
         
         assert sleep_completed
+
+
+class TestNodeNames:
+    """Tests for node naming and get_current_node_name."""
+    
+    @pytest.mark.asyncio
+    async def test_get_current_node_name_returns_name_during_execution(self):
+        """Test that get_current_node_name returns the node's name during execution."""
+        from tinman import get_current_node_name
+        from tinman.runtime import run_nodes
+        
+        captured_name = None
+        
+        async def my_producer(out: Annotated[Out[str], "data", StringCodec()]) -> None:
+            nonlocal captured_name
+            captured_name = get_current_node_name()
+            await out.publish("hello")
+        
+        consumer, _ = make_consumer_node("data", 1)
+        await run_nodes([my_producer, consumer], install_signal_handlers=False)
+        
+        assert captured_name == "my_producer"
+    
+    @pytest.mark.asyncio
+    async def test_get_current_node_name_returns_none_outside_node(self):
+        """Test that get_current_node_name returns None outside node execution."""
+        from tinman import get_current_node_name
+        
+        assert get_current_node_name() is None
+    
+    @pytest.mark.asyncio
+    async def test_get_current_node_name_with_disambiguated_names(self):
+        """Test that disambiguated names are reflected in get_current_node_name."""
+        from tinman import get_current_node_name
+        from tinman.runtime import run_nodes
+        
+        captured_names: list[str | None] = []
+        
+        async def worker(out: Annotated[Out[str], "data1", StringCodec()]) -> None:
+            captured_names.append(get_current_node_name())
+            await out.publish("hello")
+        worker1 = worker
+        
+        async def worker(out: Annotated[Out[str], "data2", StringCodec()]) -> None:
+            captured_names.append(get_current_node_name())
+            await out.publish("hello")
+        worker2 = worker
+        
+        async def final_consumer(
+            inp1: Annotated[In[str], "data1"],
+            inp2: Annotated[In[str], "data2"]
+        ) -> None:
+            async for _ in inp1:
+                pass
+            async for _ in inp2:
+                pass
+        
+        await run_nodes([worker1, worker2, final_consumer], install_signal_handlers=False)
+        
+        # Should have captured worker_1 and worker_2
+        assert "worker_1" in captured_names
+        assert "worker_2" in captured_names
 
 
 class TestDaemonNodes:

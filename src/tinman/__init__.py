@@ -10,6 +10,7 @@ from .runtime import NodeSpec as NodeSpec
 from .runtime import ShutdownRequested as ShutdownRequested
 from .runtime import daemon as daemon
 from .runtime import get_node_specs as get_node_specs
+from .runtime import get_current_node_name as get_current_node_name
 from .runtime import validate_nodes as validate_nodes
 from .launcher import create_logging_node as create_logging_node
 from .launcher import create_playback_graph as create_playback_graph
