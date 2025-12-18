@@ -218,24 +218,29 @@ async def create_playback_graph(
                 else:
                     # Advance clock, waking any timers in between
                     await clock.advance_to(timestamp)
-            elif speed > 0:
+                
+                # Publish and yield to let consumer process at this timestamp
+                await out.publish(item)
+                await asyncio.sleep(0)
+            else:
                 # Speed-controlled playback with real delays
-                if start_time is None:
-                    start_time = timestamp
-                    start_real = time_ns()
-                    first_message = False
-                else:
-                    # Calculate target time
-                    elapsed_log = timestamp - start_time
-                    assert start_real is not None
-                    target_real = start_real + int(elapsed_log / speed)
-                    current = time_ns()
+                if speed > 0:
+                    if start_time is None:
+                        start_time = timestamp
+                        start_real = time_ns()
+                        first_message = False
+                    else:
+                        # Calculate target time
+                        elapsed_log = timestamp - start_time
+                        assert start_real is not None
+                        target_real = start_real + int(elapsed_log / speed)
+                        current = time_ns()
 
-                    # Sleep if needed
-                    if current < target_real:
-                        await asyncio.sleep((target_real - current) / 1e9)
+                        # Sleep if needed
+                        if current < target_real:
+                            await asyncio.sleep((target_real - current) / 1e9)
 
-            await out.publish(item)
+                await out.publish(item)
 
         # After all messages, flush any remaining timers
         if speed == float('inf') and clock is not None:

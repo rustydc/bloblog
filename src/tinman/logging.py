@@ -637,9 +637,10 @@ def create_log_printer(channel: str = "logs") -> NodeSpec:
             text.append(time_str, style="dim")
             text.append(" ")
             text.append(f"[{level_name:8}]", style=style)
-            text.append(" ")
             if entry.node_name:
                 text.append(f"[{entry.node_name}] ", style="cyan")
+            else:
+                text.append(" ")
             text.append(f"{entry.name}: {entry.message}")
             console.print(text)
             
