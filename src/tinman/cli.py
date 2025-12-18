@@ -21,9 +21,9 @@ import cyclopts
 
 from .launcher import playback as _playback
 from .launcher import run as _run
-from .runtime import NodeSpec
+from .runtime import NodeSpec, get_node_specs
 from .oblog import enable_pickle_codec
-from .logging import log_capture_context
+from .logging import log_capture_context, create_log_printer
 from .stats import create_stats_node
 
 app = cyclopts.App(
@@ -214,7 +214,9 @@ def run(
     
     level = getattr(logging, log_level.upper(), logging.INFO)
     with log_capture_context(capture_logs, channel=log_channel, level=level) as log_nodes:
-        asyncio.run(_run([*node_list, *log_nodes, *stats_nodes], log_dir=log_dir))  # type: ignore[arg-type]
+        # Add log printer if we're capturing logs
+        printer_nodes = [create_log_printer(log_channel)] if capture_logs else []
+        asyncio.run(_run([*node_list, *log_nodes, *printer_nodes, *stats_nodes], log_dir=log_dir))  # type: ignore[arg-type]
 
 
 @app.command
@@ -277,6 +279,10 @@ def playback(
     # Add stats node if requested
     stats_nodes = [create_stats_node(daemon=True)] if stats else []
     
+    # Check if logs channel will exist (from capture or recorded)
+    has_recorded_logs = (from_ / f"{log_channel}.blog").exists()
+    has_logs_channel = capture_logs or has_recorded_logs
+    
     level = getattr(logging, log_level.upper(), logging.INFO)
     with log_capture_context(
         capture_logs,
@@ -284,8 +290,10 @@ def playback(
         level=level,
         use_virtual_time=use_virtual_time,
     ) as log_nodes:
+        # Add log printer if logs channel exists
+        printer_nodes = [create_log_printer(log_channel)] if has_logs_channel else []
         asyncio.run(_playback(
-            [*node_list, *log_nodes, *stats_nodes],
+            [*node_list, *log_nodes, *printer_nodes, *stats_nodes],
             playback_dir=from_,
             speed=speed,
             log_dir=log_dir,

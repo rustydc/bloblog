@@ -579,5 +579,53 @@ def log_capture_context(
         logging.getLogger().removeHandler(handler)
 
 
+def create_log_printer(channel: str = "logs") -> NodeSpec:
+    """Create a daemon node that prints log entries from a channel.
+    
+    Args:
+        channel: Channel name to subscribe to. Default: "logs".
+        
+    Returns:
+        A NodeSpec (daemon) that prints log entries with colored severity.
+        
+    Example:
+        >>> # Auto-attach to print captured logs
+        >>> nodes = [producer, consumer, log_handler.node, create_log_printer()]
+        >>> await run(nodes)
+    """
+    from .pubsub import In
+    from rich.console import Console
+    
+    # Color mapping for log levels
+    LEVEL_COLORS = {
+        logging.DEBUG: "dim",
+        logging.INFO: "green",
+        logging.WARNING: "yellow",
+        logging.ERROR: "red",
+        logging.CRITICAL: "red bold",
+    }
+    
+    console = Console()
+    
+    async def log_printer_node(logs: In[LogEntry]) -> None:
+        """Print log entries as they arrive."""
+        async for entry in logs:
+            level_name = logging.getLevelName(entry.level)
+            color = LEVEL_COLORS.get(entry.level, "white")
+            # Format: [LEVEL   ] logger_name: message
+            console.print(f"[{color}][{level_name:8}][/{color}] {entry.name}: {entry.message}")
+            if entry.exc_text:
+                console.print(f"[red]{entry.exc_text}[/red]")
+    
+    return NodeSpec(
+        node_fn=log_printer_node,
+        inputs={"logs": (channel, 100)},  # Larger queue to avoid blocking
+        outputs={},
+        all_channels_param=None,
+        timer_param=None,
+        daemon=True,
+    )
+
+
 # Convenience for getting the codec
 LOG_CODEC = LogEntryCodec()
