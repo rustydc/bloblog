@@ -29,16 +29,31 @@ class BlobLog:
     """
 
     def __init__(self, log_dir: Path):
+        """Initialize a BlobLog directory.
+        
+        Args:
+            log_dir: Directory to store log files.
+        """
         self.log_dir = log_dir
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._queues: dict[str, asyncio.Queue[tuple[int, Buffer] | None]] = {}
         self._tasks: dict[str, asyncio.Task] = {}
+        self._cleared = False
 
     def get_writer(self, channel: str) -> Callable[[Buffer], None]:
         """Get a write function for a channel.
 
         Returns the same writer if called multiple times for the same channel.
+        
+        On the first call to get_writer, all existing .blog files in the
+        directory are removed to ensure a fresh recording session.
         """
+        # Clear existing logs on first writer to avoid appending to stale data
+        if not self._cleared:
+            for blog_file in self.log_dir.glob("*.blog"):
+                blog_file.unlink()
+            self._cleared = True
+        
         if channel not in self._queues:
             queue: asyncio.Queue[tuple[int, Buffer] | None] = asyncio.Queue()
             self._queues[channel] = queue

@@ -135,20 +135,17 @@ class TestReadChannel:
         log_file1 = tmp_path / "channel1.blog"
         log_file2 = tmp_path / "channel2.blog"
 
-        # Write to channel 1
+        # Write to both channels using a single writer
         writer = BlobLog(tmp_path)
         write1 = writer.get_writer("channel1")
-        write1(b"c1-first")
-        await asyncio.sleep(0.002)
-        write1(b"c1-second")
-        await writer.close()
-
-        # Write to channel 2 (with timestamps between channel 1's)
-        writer = BlobLog(tmp_path)
         write2 = writer.get_writer("channel2")
+        
+        write1(b"c1-first")
         await asyncio.sleep(0.001)
         write2(b"c2-first")
-        await asyncio.sleep(0.002)
+        await asyncio.sleep(0.001)
+        write1(b"c1-second")
+        await asyncio.sleep(0.001)
         write2(b"c2-second")
         await writer.close()
 

@@ -46,6 +46,7 @@ class ObLog:
         # Read first record to get codec
         first = True
         codec = None
+        record_num = 0
 
         async for timestamp, data in self.blob_log.read_channel(channel):
             if first:
@@ -54,7 +55,14 @@ class ObLog:
                 continue
 
             assert codec is not None
-            item = codec.decode(data)
+            record_num += 1
+            try:
+                item = codec.decode(data)
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to decode record {record_num} in channel '{channel}' "
+                    f"using {type(codec).__name__}: {e}"
+                ) from e
             yield timestamp, item
 
     async def read_codec(self, channel: str) -> Codec:

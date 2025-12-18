@@ -28,5 +28,11 @@ from .logging import uninstall_timer_log_factory as uninstall_timer_log_factory
 from .logging import timer_log_context as timer_log_context
 from .logging import log_capture_context as log_capture_context
 
+# Stats
+from .stats import create_stats_node as create_stats_node
+from .stats import ChannelStats as ChannelStats
+from .stats import StatsCollector as StatsCollector
+from .stats import run_stats as run_stats
+
 # Codecs
 from . import codecs as codecs

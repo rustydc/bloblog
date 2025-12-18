@@ -24,6 +24,7 @@ from .launcher import run as _run
 from .runtime import NodeSpec
 from .oblog import enable_pickle_codec
 from .logging import log_capture_context
+from .stats import create_stats_node
 
 app = cyclopts.App(
     name="tinman",
@@ -172,6 +173,7 @@ def run(
     capture_logs: bool = True,
     log_level: str = "INFO",
     log_channel: str = "logs",
+    stats: bool = False,
 ) -> None:
     """Run a node graph.
 
@@ -192,6 +194,8 @@ def run(
         One of: DEBUG, INFO, WARNING, ERROR, CRITICAL. Default: INFO.
     log_channel
         Channel name for captured logs. Default: "logs".
+    stats
+        Print channel statistics (message counts and Hz) on exit.
 
     Examples
     --------
@@ -199,14 +203,18 @@ def run(
     $ tinman run myapp.sensors:camera myapp.processors:detector --log-dir logs/
     $ tinman run myapp:nodes --log-dir logs/ --capture-logs
     $ tinman run myapp:nodes --log-dir logs/ --capture-logs --log-level DEBUG
+    $ tinman run myapp:nodes --stats
     """
     if pickle:
         enable_pickle_codec()
     node_list = load_nodes(nodes)
     
+    # Add stats node if requested
+    stats_nodes = [create_stats_node(daemon=True)] if stats else []
+    
     level = getattr(logging, log_level.upper(), logging.INFO)
     with log_capture_context(capture_logs, channel=log_channel, level=level) as log_nodes:
-        asyncio.run(_run([*node_list, *log_nodes], log_dir=log_dir))  # type: ignore[arg-type]
+        asyncio.run(_run([*node_list, *log_nodes, *stats_nodes], log_dir=log_dir))  # type: ignore[arg-type]
 
 
 @app.command
@@ -221,6 +229,7 @@ def playback(
     log_level: str = "INFO",
     log_channel: str = "logs",
     use_virtual_time: bool = True,
+    stats: bool = False,
 ) -> None:
     """Play back recorded logs through nodes.
 
@@ -250,6 +259,8 @@ def playback(
         Use virtual/scaled time for Python logging timestamps. When enabled,
         log messages will have timestamps matching the playback time rather
         than wall clock time. Default: True.
+    stats
+        Print channel statistics (message counts and Hz) on exit.
 
     Examples
     --------
@@ -257,10 +268,14 @@ def playback(
     $ tinman playback myapp:consumer --from logs/ --speed 1.0
     $ tinman playback myapp:transform --from logs/ --log-dir processed/
     $ tinman playback myapp:consumer --from logs/ --capture-logs
+    $ tinman playback myapp:consumer --from logs/ --stats
     """
     if pickle:
         enable_pickle_codec()
     node_list = load_nodes(nodes)
+    
+    # Add stats node if requested
+    stats_nodes = [create_stats_node(daemon=True)] if stats else []
     
     level = getattr(logging, log_level.upper(), logging.INFO)
     with log_capture_context(
@@ -270,11 +285,42 @@ def playback(
         use_virtual_time=use_virtual_time,
     ) as log_nodes:
         asyncio.run(_playback(
-            [*node_list, *log_nodes],
+            [*node_list, *log_nodes, *stats_nodes],
             playback_dir=from_,
             speed=speed,
             log_dir=log_dir,
         ))  # type: ignore[arg-type]
+
+
+@app.command
+def stats(
+    *,
+    from_: Annotated[Path, cyclopts.Parameter(name=["--from", "-f"])],
+    pickle: bool = False,
+) -> None:
+    """Print channel statistics from recorded logs.
+
+    This is a standalone command that plays back all channels in a log directory
+    and prints statistics (message counts and Hz) without running any consumer nodes.
+
+    Parameters
+    ----------
+    from_
+        Directory containing log files to analyze.
+    pickle
+        Enable PickleCodec for arbitrary Python objects (security risk with untrusted data).
+
+    Examples
+    --------
+    $ tinman stats --from logs/
+    $ tinman stats -f webcam_logs/
+    """
+    from .stats import run_stats
+    
+    if pickle:
+        enable_pickle_codec()
+    
+    asyncio.run(run_stats(from_))
 
 
 def main() -> None:
