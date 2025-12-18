@@ -187,7 +187,7 @@ class TestPlayback:
                     break
 
         # Use explicit playback graph
-        graph = await create_playback_graph([live_consumer], tmp_path)
+        graph, _ = await create_playback_graph([live_consumer], tmp_path)
         await run(graph)
 
         assert received == messages
@@ -240,10 +240,12 @@ class TestPlaybackNode:
                 received.append(msg)
         
         # Create playback graph - this should automatically add playback node
-        graph = await create_playback_graph([consumer], tmp_path)
+        graph, first_ts = await create_playback_graph([consumer], tmp_path)
         
         # Verify it added a playback node
         assert len(graph) == 2  # playback + consumer
+        # Verify first timestamp was returned
+        assert first_ts is not None
         
         # Run and verify
         await run(graph)
@@ -268,7 +270,7 @@ class TestPlaybackNode:
                 received.append(msg)
                 timestamps.append(time.time())
         
-        graph = await create_playback_graph([consumer], tmp_path, speed=2.0)
+        graph, _ = await create_playback_graph([consumer], tmp_path, speed=2.0)
         
         start = time.time()
         await run(graph)

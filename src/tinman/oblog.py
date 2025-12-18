@@ -136,6 +136,26 @@ class ObLogReader:
             return safe_unpickle_codec(bytes(data))
         raise ValueError(f"Channel '{channel}' log file is empty")
 
+    async def first_timestamp(self, channel: str) -> int | None:
+        """Get the timestamp of the first data record in a channel.
+        
+        Skips the codec record and returns the timestamp of the first actual
+        data record. Returns None if the channel has no data records.
+        
+        Args:
+            channel: Channel name to read from.
+            
+        Returns:
+            Timestamp in nanoseconds, or None if no data records.
+        """
+        first = True
+        async for timestamp, _data in self._reader.read_channel(channel):
+            if first:
+                first = False  # Skip codec record
+                continue
+            return timestamp
+        return None
+
     def channels(self) -> list[str]:
         """List all available channels in this log directory."""
         return self._reader.channels()

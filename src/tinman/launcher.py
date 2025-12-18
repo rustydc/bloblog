@@ -113,7 +113,7 @@ async def create_playback_graph(
     playback_dir: Path,
     speed: float = 1.0,
     clock: VirtualClock | None = None,
-) -> list[Callable | NodeSpec]:
+) -> tuple[list[Callable | NodeSpec], int | None]:
     """Create a graph with playback nodes injected for missing inputs.
 
     This function analyzes the given nodes to find which channels they need,
@@ -129,8 +129,10 @@ async def create_playback_graph(
                The playback node will advance this clock as it processes messages.
 
     Returns:
-        List of nodes with playback nodes injected. Original nodes may include
-        NodeSpec objects for the playback node.
+        Tuple of (graph, first_timestamp) where:
+        - graph: List of nodes with playback nodes injected
+        - first_timestamp: Timestamp (ns) of first message across all channels,
+          or None if no playback needed
 
     Raises:
         FileNotFoundError: If a required log file doesn't exist.
@@ -140,7 +142,7 @@ async def create_playback_graph(
         >>> # Record some data
         >>> await run([producer, create_logging_node(Path("logs"), codecs)])
         >>> # Play back later (real-time)
-        >>> graph = await create_playback_graph([consumer], Path("logs"))
+        >>> graph, first_ts = await create_playback_graph([consumer], Path("logs"))
         >>> await run_nodes(graph)
         >>> # Fast-forward playback
         >>> clock = VirtualClock()
@@ -167,40 +169,44 @@ async def create_playback_graph(
 
     if not missing_channels:
         # No playback needed
-        return list(nodes)
+        return list(nodes), None
 
-    # Read codecs for all missing channels
+    # Read codecs and first timestamps for all missing channels
     oblog = ObLogReader(playback_dir)
     channel_codecs: dict[str, Codec] = {}
+    first_timestamp: int | None = None
+    
     for channel in missing_channels:
         try:
             codec = await oblog.read_codec(channel)
             channel_codecs[channel] = codec
+            # Get first timestamp for this channel
+            ts = await oblog.first_timestamp(channel)
+            if ts is not None and (first_timestamp is None or ts < first_timestamp):
+                first_timestamp = ts
         except FileNotFoundError:
             raise FileNotFoundError(
                 f"No log file for channel '{channel}' in {playback_dir}"
             )
 
     # Create a single playback node that outputs all missing channels
+    # Capture oblog in closure so we reuse the same reader
     async def playback_node(**outputs: Out) -> None:
         """Playback node that reads from logs and publishes to output channels."""
         # Build list of channels for index mapping
         channel_list = list(channel_codecs.items())
 
-        # Set up readers for all channels (no cleanup needed - uses finalizers)
-        reader = ObLogReader(playback_dir)
-        readers = [reader.read_channel(channel_name) for channel_name, _codec in channel_list]
+        # Set up readers for all channels using the shared oblog reader
+        readers = [oblog.read_channel(channel_name) for channel_name, _codec in channel_list]
 
         # Merge all streams and publish with timing
         start_time: int | None = None
         start_real: int | None = None
         first_message = True
-        last_timestamp: int = 0
 
         async for source_idx, timestamp, item in amerge(*readers):
             channel_name, _ = channel_list[source_idx]
             out = outputs[channel_name]
-            last_timestamp = timestamp
 
             if speed == float('inf'):
                 # Fast-forward mode: advance virtual clock
@@ -217,6 +223,7 @@ async def create_playback_graph(
                 if start_time is None:
                     start_time = timestamp
                     start_real = time_ns()
+                    first_message = False
                 else:
                     # Calculate target time
                     elapsed_log = timestamp - start_time
@@ -250,8 +257,8 @@ async def create_playback_graph(
         timer_param=None,
     )
 
-    # Return playback node + original nodes
-    return [playback_spec, *nodes]
+    # Return playback node + original nodes, and first timestamp
+    return [playback_spec, *nodes], first_timestamp
 
 
 async def run(
@@ -298,6 +305,7 @@ async def playback(
     playback_dir: Path,
     speed: float = float('inf'),
     log_dir: Path | None = None,
+    use_virtual_time_logs: bool = False,
 ) -> None:
     """Run nodes with playback from logs, optionally logging outputs.
 
@@ -319,6 +327,8 @@ async def playback(
                - 0.5: Half speed
         log_dir: Optional directory to log output channels. Useful for
                 recording transformed/processed data.
+        use_virtual_time_logs: If True, Python log records will use the
+                playback timer for timestamps instead of wall clock time.
 
     Raises:
         FileNotFoundError: If required log files don't exist.
@@ -337,22 +347,38 @@ async def playback(
         >>> # Playback and log transformed outputs
         >>> await playback([transform], Path("logs"), log_dir=Path("processed"))
     """
-    # Create timer based on speed
-    timer: Timer
+    from .logging import install_timer_log_factory, uninstall_timer_log_factory
+    
+    # First, create the playback graph to get the first timestamp
+    # We need this before creating the timer
     clock: VirtualClock | None = None
-
     if speed == float('inf'):
-        # Fast-forward mode: use virtual clock
         clock = VirtualClock()
+    
+    graph, first_timestamp = await create_playback_graph(nodes, playback_dir, speed=speed, clock=clock)
+    
+    # Create timer based on speed, initialized to playback start time
+    timer: Timer
+    if speed == float('inf'):
+        # Fast-forward mode: use virtual clock (already created above)
+        assert clock is not None
+        if first_timestamp is not None:
+            clock._time = first_timestamp
         timer = FastForwardTimer(clock)
     else:
-        # Scaled playback (including real-time at speed=1.0)
-        timer = ScaledTimer(speed)
+        # Scaled playback: initialize timer to first message timestamp
+        timer = ScaledTimer(speed, start_time=first_timestamp)
 
-    graph = await create_playback_graph(nodes, playback_dir, speed=speed, clock=clock)
-    
-    if log_dir is not None:
-        # Only log outputs from the user's nodes, not the playback node
-        graph.append(create_logging_node(log_dir, nodes))
+    # Install timer log factory if requested
+    if use_virtual_time_logs:
+        install_timer_log_factory(timer)
 
-    await run_nodes(graph, timer=timer)
+    try:
+        if log_dir is not None:
+            # Only log outputs from the user's nodes, not the playback node
+            graph.append(create_logging_node(log_dir, nodes))
+
+        await run_nodes(graph, timer=timer)
+    finally:
+        if use_virtual_time_logs:
+            uninstall_timer_log_factory()

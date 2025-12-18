@@ -288,7 +288,7 @@ def playback(
         capture_logs,
         channel=log_channel,
         level=level,
-        use_virtual_time=use_virtual_time,
+        use_virtual_time=False,  # Timer factory is installed by _playback instead
     ) as log_nodes:
         # Add log printer if logs channel exists
         printer_nodes = [create_log_printer(log_channel)] if has_logs_channel else []
@@ -297,6 +297,7 @@ def playback(
             playback_dir=from_,
             speed=speed,
             log_dir=log_dir,
+            use_virtual_time_logs=use_virtual_time,
         ))  # type: ignore[arg-type]
 
 

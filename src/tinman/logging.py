@@ -593,11 +593,13 @@ def create_log_printer(channel: str = "logs") -> NodeSpec:
         >>> nodes = [producer, consumer, log_handler.node, create_log_printer()]
         >>> await run(nodes)
     """
+    from datetime import datetime
     from .pubsub import In
     from rich.console import Console
+    from rich.text import Text
     
     # Color mapping for log levels
-    LEVEL_COLORS = {
+    LEVEL_STYLES = {
         logging.DEBUG: "dim",
         logging.INFO: "green",
         logging.WARNING: "yellow",
@@ -611,11 +613,20 @@ def create_log_printer(channel: str = "logs") -> NodeSpec:
         """Print log entries as they arrive."""
         async for entry in logs:
             level_name = logging.getLevelName(entry.level)
-            color = LEVEL_COLORS.get(entry.level, "white")
-            # Format: [LEVEL   ] logger_name: message
-            console.print(f"[{color}][{level_name:8}][/{color}] {entry.name}: {entry.message}")
+            style = LEVEL_STYLES.get(entry.level, "white")
+            # Convert timestamp_ns to datetime
+            timestamp = datetime.fromtimestamp(entry.timestamp_ns / 1_000_000_000)
+            time_str = timestamp.strftime("%H:%M:%S.%f")
+            
+            text = Text()
+            text.append(time_str, style="dim")
+            text.append(" ")
+            text.append(f"[{level_name:8}]", style=style)
+            text.append(f" {entry.name}: {entry.message}")
+            console.print(text)
+            
             if entry.exc_text:
-                console.print(f"[red]{entry.exc_text}[/red]")
+                console.print(Text(entry.exc_text, style="red"))
     
     return NodeSpec(
         node_fn=log_printer_node,
