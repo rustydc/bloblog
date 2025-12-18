@@ -19,7 +19,7 @@ try:
 except ImportError:
     HAS_PYARROW = False
 
-from tinman import Codec, ObLog
+from tinman import Codec, ObLogWriter, ObLogReader
 from tinman.codecs import DataFrameCodec
 
 
@@ -301,10 +301,9 @@ def test_zero_copy_proof_memory():
         
         # Write it
         async def write_data():
-            oblog = ObLog(tmp_path)
-            write = oblog.get_writer("test", DataFrameCodec())
-            write(large_df)
-            await oblog.close()
+            async with ObLogWriter(tmp_path) as oblog:
+                write = oblog.get_writer("test", DataFrameCodec())
+                write(large_df)
         
         asyncio.run(write_data())
         del large_df
@@ -315,16 +314,15 @@ def test_zero_copy_proof_memory():
         
         # Read DataFrame (should be zero-copy, minimal memory increase)
         async def read_data():
-            oblog = ObLog(tmp_path)
+            reader = ObLogReader(tmp_path)
             result = None
-            async for _, df in oblog.read_channel("test"):
+            async for _, df in reader.read_channel("test"):
                 result = df
                 # Verify columns are views
                 for col in df.columns:
                     arr = df[col].values
                     assert arr.base is not None, f"Column '{col}' should be a view"
                     assert not arr.flags.writeable, f"Column '{col}' should be read-only"
-            await oblog.close()
             return result
         
         df = asyncio.run(read_data())
@@ -365,21 +363,19 @@ def test_zero_copy_proof_data_integrity():
         
         # Write
         async def write_data():
-            oblog = ObLog(tmp_path)
-            write = oblog.get_writer("test", DataFrameCodec())
-            for df in dfs:
-                write(df)
-            await oblog.close()
+            async with ObLogWriter(tmp_path) as oblog:
+                write = oblog.get_writer("test", DataFrameCodec())
+                for df in dfs:
+                    write(df)
         
         asyncio.run(write_data())
         
         # Read and verify
         async def read_and_verify():
-            oblog = ObLog(tmp_path)
+            reader = ObLogReader(tmp_path)
             read_dfs = []
-            async for _, df in oblog.read_channel("test"):
+            async for _, df in reader.read_channel("test"):
                 read_dfs.append(df.copy())  # Copy to compare
-            await oblog.close()
             return read_dfs
         
         read_dfs = asyncio.run(read_and_verify())

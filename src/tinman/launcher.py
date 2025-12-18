@@ -23,7 +23,7 @@ from pathlib import Path
 from time import time_ns
 
 from .bloblog import amerge
-from .oblog import Codec, ObLog
+from .oblog import Codec, ObLogWriter, ObLogReader
 from .pubsub import In, Out
 from .runtime import NodeSpec, get_node_specs, run_nodes
 from .timer import Timer, ScaledTimer, FastForwardTimer, VirtualClock
@@ -72,9 +72,7 @@ def create_logging_node(
 
     async def logging_node(channels: dict[str, In]) -> None:
         """Log all subscribed channels to disk."""
-        oblog = ObLog(log_dir)
-
-        try:
+        async with ObLogWriter(log_dir) as oblog:
             async def log_channel(channel_name: str, input_channel: In, codec: Codec | None) -> None:
                 """Log a single channel."""
                 if codec is None:
@@ -100,8 +98,6 @@ def create_logging_node(
                         continue
 
                     tg.create_task(log_channel(channel_name, input_channel, codec))
-        finally:
-            await oblog.close()
 
     return NodeSpec(
         node_fn=logging_node,
@@ -174,20 +170,16 @@ async def create_playback_graph(
         return list(nodes)
 
     # Read codecs for all missing channels
-    oblog = ObLog(playback_dir)
+    oblog = ObLogReader(playback_dir)
     channel_codecs: dict[str, Codec] = {}
-
-    try:
-        for channel in missing_channels:
-            try:
-                codec = await oblog.read_codec(channel)
-                channel_codecs[channel] = codec
-            except FileNotFoundError:
-                raise FileNotFoundError(
-                    f"No log file for channel '{channel}' in {playback_dir}"
-                )
-    finally:
-        await oblog.close()
+    for channel in missing_channels:
+        try:
+            codec = await oblog.read_codec(channel)
+            channel_codecs[channel] = codec
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"No log file for channel '{channel}' in {playback_dir}"
+            )
 
     # Create a single playback node that outputs all missing channels
     async def playback_node(**outputs: Out) -> None:
@@ -195,64 +187,55 @@ async def create_playback_graph(
         # Build list of channels for index mapping
         channel_list = list(channel_codecs.items())
 
-        # Set up readers for all channels
-        oblogs = []
-        readers = []
-        for channel_name, _codec in channel_list:
-            oblog_reader = ObLog(playback_dir)
-            oblogs.append(oblog_reader)
-            readers.append(oblog_reader.read_channel(channel_name))
+        # Set up readers for all channels (no cleanup needed - uses finalizers)
+        reader = ObLogReader(playback_dir)
+        readers = [reader.read_channel(channel_name) for channel_name, _codec in channel_list]
 
-        try:
-            # Merge all streams and publish with timing
-            start_time: int | None = None
-            start_real: int | None = None
-            first_message = True
-            last_timestamp: int = 0
+        # Merge all streams and publish with timing
+        start_time: int | None = None
+        start_real: int | None = None
+        first_message = True
+        last_timestamp: int = 0
 
-            async for source_idx, timestamp, item in amerge(*readers):
-                channel_name, _ = channel_list[source_idx]
-                out = outputs[channel_name]
-                last_timestamp = timestamp
+        async for source_idx, timestamp, item in amerge(*readers):
+            channel_name, _ = channel_list[source_idx]
+            out = outputs[channel_name]
+            last_timestamp = timestamp
 
-                if speed == float('inf'):
-                    # Fast-forward mode: advance virtual clock
-                    assert clock is not None
-                    if first_message:
-                        # Initialize clock to first message timestamp
-                        clock._time = timestamp
-                        first_message = False
-                    else:
-                        # Advance clock, waking any timers in between
-                        await clock.advance_to(timestamp)
-                elif speed > 0:
-                    # Speed-controlled playback with real delays
-                    if start_time is None:
-                        start_time = timestamp
-                        start_real = time_ns()
-                    else:
-                        # Calculate target time
-                        elapsed_log = timestamp - start_time
-                        assert start_real is not None
-                        target_real = start_real + int(elapsed_log / speed)
-                        current = time_ns()
+            if speed == float('inf'):
+                # Fast-forward mode: advance virtual clock
+                assert clock is not None
+                if first_message:
+                    # Initialize clock to first message timestamp
+                    clock._time = timestamp
+                    first_message = False
+                else:
+                    # Advance clock, waking any timers in between
+                    await clock.advance_to(timestamp)
+            elif speed > 0:
+                # Speed-controlled playback with real delays
+                if start_time is None:
+                    start_time = timestamp
+                    start_real = time_ns()
+                else:
+                    # Calculate target time
+                    elapsed_log = timestamp - start_time
+                    assert start_real is not None
+                    target_real = start_real + int(elapsed_log / speed)
+                    current = time_ns()
 
-                        # Sleep if needed
-                        if current < target_real:
-                            await asyncio.sleep((target_real - current) / 1e9)
+                    # Sleep if needed
+                    if current < target_real:
+                        await asyncio.sleep((target_real - current) / 1e9)
 
-                await out.publish(item)
+            await out.publish(item)
 
-            # After all messages, flush any remaining timers
-            if speed == float('inf') and clock is not None:
-                # Yield to let consumers process their messages and schedule timers
-                await asyncio.sleep(0)
-                # Wake all pending timers
-                await clock.flush()
-        finally:
-            # Close all oblogs
-            for oblog_reader in oblogs:
-                await oblog_reader.close()
+        # After all messages, flush any remaining timers
+        if speed == float('inf') and clock is not None:
+            # Yield to let consumers process their messages and schedule timers
+            await asyncio.sleep(0)
+            # Wake all pending timers
+            await clock.flush()
 
     # Create NodeSpec for the playback node with output annotations
     playback_outputs = {

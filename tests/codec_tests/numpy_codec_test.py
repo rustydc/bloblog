@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 import numpy as np
 import pytest
 
-from tinman import ObLog
+from tinman import ObLogWriter, ObLogReader
 from tinman.codecs import NumpyArrayCodec
 
 
@@ -64,25 +64,22 @@ class TestNumpyArrayCodec:
             log_dir = Path(tmpdir)
             
             # Write arrays
-            oblog = ObLog(log_dir)
-            write = oblog.get_writer("arrays", NumpyArrayCodec())
+            async with ObLogWriter(log_dir) as oblog:
+                write = oblog.get_writer("arrays", NumpyArrayCodec())
+                
+                arrays = [
+                    np.array([1, 2, 3], dtype=np.int32),
+                    np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64),
+                ]
+                
+                for arr in arrays:
+                    write(arr)
             
-            arrays = [
-                np.array([1, 2, 3], dtype=np.int32),
-                np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64),
-            ]
-            
-            for arr in arrays:
-                write(arr)
-            
-            await oblog.close()
-            
-            # Read arrays
-            oblog = ObLog(log_dir)
+            # Read arrays (no context manager needed)
+            reader = ObLogReader(log_dir)
             read_arrays = []
-            async for _, arr in oblog.read_channel("arrays"):
+            async for _, arr in reader.read_channel("arrays"):
                 read_arrays.append(arr.copy())  # Copy to verify
-            await oblog.close()
             
             # Verify
             assert len(read_arrays) == len(arrays)
@@ -95,19 +92,17 @@ class TestNumpyArrayCodec:
             log_dir = Path(tmpdir)
             
             # Write
-            oblog = ObLog(log_dir)
-            write = oblog.get_writer("arrays", NumpyArrayCodec())
-            write(np.array([1, 2, 3], dtype=np.int32))
-            await oblog.close()
+            async with ObLogWriter(log_dir) as oblog:
+                write = oblog.get_writer("arrays", NumpyArrayCodec())
+                write(np.array([1, 2, 3], dtype=np.int32))
             
             # Read
-            oblog = ObLog(log_dir)
-            async for _, arr in oblog.read_channel("arrays"):
+            reader = ObLogReader(log_dir)
+            async for _, arr in reader.read_channel("arrays"):
                 # Should be a view
                 assert arr.base is not None
                 # Should be read-only
                 assert not arr.flags.writeable
-            await oblog.close()
 
     def test_empty_array(self):
         """Test encoding/decoding empty arrays."""

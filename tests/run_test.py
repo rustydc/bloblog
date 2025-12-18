@@ -7,7 +7,7 @@ from typing import Annotated
 import pytest
 from .test_utils import StringCodec, make_consumer_node, make_producer_node, make_transform_node
 
-from tinman import In, Out, ObLog, get_node_specs, run
+from tinman import In, Out, ObLogReader, get_node_specs, run
 from tinman.launcher import create_logging_node, create_playback_graph
 
 
@@ -130,12 +130,11 @@ class TestLoggingNode:
         log_file = tmp_path / "test_output.blog"
         assert log_file.exists()
         
-        # Read back and verify
-        oblog = ObLog(tmp_path)
+        # Read back and verify (no context manager needed for reader)
+        reader = ObLogReader(tmp_path)
         received = []
-        async for _, msg in oblog.read_channel("test_output"):
+        async for _, msg in reader.read_channel("test_output"):
             received.append(msg)
-        await oblog.close()
         
         assert received == messages
     
@@ -216,10 +215,9 @@ class TestPlaybackNode:
         logger = create_logging_node(tmp_path, [producer])
         await run([producer, logger])
         
-        # Now read the codec back
-        oblog = ObLog(tmp_path)
-        codec = await oblog.read_codec("test_output")
-        await oblog.close()
+        # Now read the codec back (no context manager needed for reader)
+        reader = ObLogReader(tmp_path)
+        codec = await reader.read_codec("test_output")
         
         # Verify it's the right type
         assert isinstance(codec, StringCodec)

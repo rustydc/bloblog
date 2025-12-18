@@ -5,14 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from tinman.bloblog import BlobLog, amerge
+from tinman.bloblog import BlobLogWriter, BlobLogReader, amerge
 
 
 def _read_bloblog_channel(log_file_path: Path):
     """Helper to read a channel from its .blog file path."""
     channel_name = log_file_path.stem
     log_dir = log_file_path.parent
-    return BlobLog(log_dir).read_channel(channel_name)
+    return BlobLogReader(log_dir).read_channel(channel_name)
 
 
 class TestReaderPerformance:
@@ -25,13 +25,12 @@ class TestReaderPerformance:
         async def create_log():
             tmpdir = tmp_path_factory.mktemp("small_logs")
             log_dir = Path(tmpdir)
-            writer = BlobLog(log_dir)
-            write = writer.get_writer("small")
+            async with BlobLogWriter(log_dir) as writer:
+                write = writer.get_writer("small")
 
-            for i in range(10_000):
-                write(f"message_{i}".encode())
+                for i in range(10_000):
+                    write(f"message_{i}".encode())
 
-            await writer.close()
             return log_dir / "small.bloblog"
 
         return asyncio.run(create_log())
@@ -43,13 +42,12 @@ class TestReaderPerformance:
         async def create_log():
             tmpdir = tmp_path_factory.mktemp("large_logs")
             log_dir = Path(tmpdir)
-            writer = BlobLog(log_dir)
-            write = writer.get_writer("large")
+            async with BlobLogWriter(log_dir) as writer:
+                write = writer.get_writer("large")
 
-            for i in range(1_000):
-                write(b"x" * 100_000)
+                for i in range(1_000):
+                    write(b"x" * 100_000)
 
-            await writer.close()
             return log_dir / "large.bloblog"
 
         return asyncio.run(create_log())
@@ -61,15 +59,13 @@ class TestReaderPerformance:
         async def create_logs():
             tmpdir = tmp_path_factory.mktemp("multi_logs")
             log_dir = Path(tmpdir)
-            writer = BlobLog(log_dir)
+            async with BlobLogWriter(log_dir) as writer:
+                # Create 5 channels with 1000 messages each
+                writers = [writer.get_writer(f"channel_{i}") for i in range(5)]
+                for _ in range(1000):
+                    for w in writers:
+                        w(b"data" * 25)
 
-            # Create 5 channels with 1000 messages each
-            writers = [writer.get_writer(f"channel_{i}") for i in range(5)]
-            for _ in range(1000):
-                for w in writers:
-                    w(b"data" * 25)
-
-            await writer.close()
             return log_dir
 
         return asyncio.run(create_logs())

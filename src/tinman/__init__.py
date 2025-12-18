@@ -1,6 +1,8 @@
-from .bloblog import BlobLog as BlobLog
+from .bloblog import BlobLogWriter as BlobLogWriter
+from .bloblog import BlobLogReader as BlobLogReader
 from .oblog import Codec as Codec
-from .oblog import ObLog as ObLog
+from .oblog import ObLogWriter as ObLogWriter
+from .oblog import ObLogReader as ObLogReader
 from .oblog import enable_pickle_codec as enable_pickle_codec
 from .pubsub import In as In
 from .pubsub import Out as Out

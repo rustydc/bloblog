@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-from tinman.bloblog import BlobLog
+from tinman.bloblog import BlobLogWriter
 
 
 class TestWriterPerformance:
@@ -22,13 +22,11 @@ class TestWriterPerformance:
         """Benchmark writing many small messages (100 bytes)."""
 
         async def write_messages():
-            writer = BlobLog(tmp_log_dir)
-            write = writer.get_writer("bench")
+            async with BlobLogWriter(tmp_log_dir) as writer:
+                write = writer.get_writer("bench")
 
-            for _ in range(1000):
-                write(b"x" * 100)
-
-            await writer.close()
+                for _ in range(1000):
+                    write(b"x" * 100)
 
         benchmark(lambda: asyncio.run(write_messages()))
 
@@ -37,13 +35,11 @@ class TestWriterPerformance:
         """Benchmark writing medium messages (10KB)."""
 
         async def write_messages():
-            writer = BlobLog(tmp_log_dir)
-            write = writer.get_writer("bench")
+            async with BlobLogWriter(tmp_log_dir) as writer:
+                write = writer.get_writer("bench")
 
-            for _ in range(1000):
-                write(b"x" * 10_000)
-
-            await writer.close()
+                for _ in range(1000):
+                    write(b"x" * 10_000)
 
         benchmark(lambda: asyncio.run(write_messages()))
 
@@ -52,13 +48,11 @@ class TestWriterPerformance:
         """Benchmark writing large messages (1MB)."""
 
         async def write_messages():
-            writer = BlobLog(tmp_log_dir)
-            write = writer.get_writer("bench")
+            async with BlobLogWriter(tmp_log_dir) as writer:
+                write = writer.get_writer("bench")
 
-            for _ in range(100):
-                write(b"x" * 1_000_000)
-
-            await writer.close()
+                for _ in range(100):
+                    write(b"x" * 1_000_000)
 
         benchmark(lambda: asyncio.run(write_messages()))
 
@@ -67,13 +61,11 @@ class TestWriterPerformance:
         """Benchmark burst writing 10k messages (tests batching behavior)."""
 
         async def write_burst():
-            writer = BlobLog(tmp_log_dir)
-            write = writer.get_writer("bench")
+            async with BlobLogWriter(tmp_log_dir) as writer:
+                write = writer.get_writer("bench")
 
-            for _ in range(10_000):
-                write(b"burst" * 20)
-
-            await writer.close()
+                for _ in range(10_000):
+                    write(b"burst" * 20)
 
         benchmark(lambda: asyncio.run(write_burst()))
 
@@ -82,13 +74,11 @@ class TestWriterPerformance:
         """Benchmark writing to 10 channels concurrently."""
 
         async def write_multi():
-            writer = BlobLog(tmp_log_dir)
-            writers = [writer.get_writer(f"channel_{i}") for i in range(10)]
+            async with BlobLogWriter(tmp_log_dir) as writer:
+                writers = [writer.get_writer(f"channel_{i}") for i in range(10)]
 
-            for _ in range(1000):
-                for w in writers:
-                    w(b"data" * 25)
-
-            await writer.close()
+                for _ in range(1000):
+                    for w in writers:
+                        w(b"data" * 25)
 
         benchmark(lambda: asyncio.run(write_multi()))

@@ -22,34 +22,48 @@ except (AttributeError, ValueError, OSError):
     IOV_MAX = 16  # POSIX minimum guaranteed
 
 
-class BlobLog:
-    """Binary log directory containing multiple channels.
+class BlobLogWriter:
+    """Write-only binary log directory.
 
     Each channel is a separate .blog file storing (timestamp, raw bytes) records.
+    
+    Use as an async context manager to ensure proper cleanup:
+    
+        async with BlobLogWriter(Path("logs")) as writer:
+            write = writer.get_writer("channel")
+            write(b"data")
     """
 
-    def __init__(self, log_dir: Path):
-        """Initialize a BlobLog directory.
+    def __init__(self, log_dir: Path, clear: bool = True):
+        """Initialize a BlobLogWriter.
         
         Args:
             log_dir: Directory to store log files.
+            clear: If True (default), remove existing .blog files on first write.
         """
         self.log_dir = log_dir
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._queues: dict[str, asyncio.Queue[tuple[int, Buffer] | None]] = {}
         self._tasks: dict[str, asyncio.Task] = {}
+        self._clear = clear
         self._cleared = False
+
+    async def __aenter__(self) -> "BlobLogWriter":
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.close()
 
     def get_writer(self, channel: str) -> Callable[[Buffer], None]:
         """Get a write function for a channel.
 
         Returns the same writer if called multiple times for the same channel.
         
-        On the first call to get_writer, all existing .blog files in the
-        directory are removed to ensure a fresh recording session.
+        On the first call to get_writer (if clear=True), all existing .blog 
+        files in the directory are removed to ensure a fresh recording session.
         """
         # Clear existing logs on first writer to avoid appending to stale data
-        if not self._cleared:
+        if self._clear and not self._cleared:
             for blog_file in self.log_dir.glob("*.blog"):
                 blog_file.unlink()
             self._cleared = True
@@ -111,42 +125,71 @@ class BlobLog:
         self._queues.clear()
         self._tasks.clear()
 
-    async def read_channel(self, channel: str) -> AsyncGenerator[tuple[int, memoryview], None]:
+
+class BlobLogReader:
+    """Read-only binary log directory.
+
+    Each channel is a separate .blog file storing (timestamp, raw bytes) records.
+    No explicit cleanup needed - resources are cleaned via finalizers.
+    
+    Example:
+        reader = BlobLogReader(Path("logs"))
+        async for timestamp, data in reader.read_channel("camera"):
+            process(data)
+    """
+
+    def __init__(self, log_dir: Path):
+        """Initialize a BlobLogReader.
+        
+        Args:
+            log_dir: Directory containing log files.
+        """
+        self.log_dir = log_dir
+
+    def read_channel(self, channel: str) -> AsyncGenerator[tuple[int, memoryview], None]:
         """Read all records from a channel, yielding (timestamp, data) tuples.
 
         The memoryview slices remain valid as long as they are referenced.
         Resources are cleaned up via finalizer when no longer needed.
         """
-        path = self.log_dir / f"{channel}.blog"
-        f = await asyncio.to_thread(open, path, "rb")
-        mm = await asyncio.to_thread(mmap.mmap, f.fileno(), 0, access=mmap.ACCESS_READ)
-        mv = memoryview(mm)
+        return _read_channel(self.log_dir / f"{channel}.blog")
 
-        # Set up finalizer to clean up when memoryview is garbage collected
-        weakref.finalize(mv, _close_mmap, mv, mm, f)
+    def channels(self) -> list[str]:
+        """List all available channels in this log directory."""
+        return [f.stem for f in self.log_dir.glob("*.blog")]
 
-        offset = 0
-        size = len(mm)
-        batch_size = 1000  # Yield to event loop periodically
-        count = 0
 
-        while offset < size:
-            if size - offset < 16:
-                raise ValueError(
-                    f"Truncated header in {path}: expected 16 bytes, got {size - offset}"
-                )
-            time, data_len = HEADER_STRUCT.unpack_from(mm, offset)
-            offset += 16
-            if size - offset < data_len:
-                raise ValueError(
-                    f"Truncated data in {path}: expected {data_len} bytes, got {size - offset}"
-                )
-            data = mv[offset : offset + data_len]  # zero-copy memoryview slice
-            offset += data_len
-            yield time, data
-            count += 1
-            if count % batch_size == 0:
-                await asyncio.sleep(0)  # Yield to event loop
+async def _read_channel(path: Path) -> AsyncGenerator[tuple[int, memoryview], None]:
+    """Read all records from a .blog file."""
+    f = await asyncio.to_thread(open, path, "rb")
+    mm = await asyncio.to_thread(mmap.mmap, f.fileno(), 0, access=mmap.ACCESS_READ)
+    mv = memoryview(mm)
+
+    # Set up finalizer to clean up when memoryview is garbage collected
+    weakref.finalize(mv, _close_mmap, mv, mm, f)
+
+    offset = 0
+    size = len(mm)
+    batch_size = 1000  # Yield to event loop periodically
+    count = 0
+
+    while offset < size:
+        if size - offset < 16:
+            raise ValueError(
+                f"Truncated header in {path}: expected 16 bytes, got {size - offset}"
+            )
+        time, data_len = HEADER_STRUCT.unpack_from(mm, offset)
+        offset += 16
+        if size - offset < data_len:
+            raise ValueError(
+                f"Truncated data in {path}: expected {data_len} bytes, got {size - offset}"
+            )
+        data = mv[offset : offset + data_len]  # zero-copy memoryview slice
+        offset += data_len
+        yield time, data
+        count += 1
+        if count % batch_size == 0:
+            await asyncio.sleep(0)  # Yield to event loop
 
 
 def _close_mmap(mv: memoryview, mm: mmap.mmap, f: BinaryIO) -> None:

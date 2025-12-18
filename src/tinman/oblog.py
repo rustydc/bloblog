@@ -6,19 +6,37 @@ import pickle
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 
-from .bloblog import BlobLog
+from .bloblog import BlobLogReader, BlobLogWriter
 
 
-class ObLog:
-    """Object log directory with automatic encoding/decoding.
+class ObLogWriter:
+    """Write-only object log directory with automatic encoding.
 
-    Wraps BlobLog to handle codec metadata and object serialization.
+    Wraps BlobLogWriter to handle codec metadata and object serialization.
     Each channel stores its codec as the first record.
+    
+    Use as an async context manager to ensure proper cleanup:
+    
+        async with ObLogWriter(Path("logs")) as writer:
+            write = writer.get_writer("channel", MyCodec())
+            write(my_object)
     """
 
-    def __init__(self, log_dir: Path):
-        self.blob_log = BlobLog(log_dir)
+    def __init__(self, log_dir: Path, clear: bool = True):
+        """Initialize an ObLogWriter.
+        
+        Args:
+            log_dir: Directory to store log files.
+            clear: If True (default), remove existing .blog files on first write.
+        """
+        self._writer = BlobLogWriter(log_dir, clear=clear)
         self._codecs: dict[str, Codec] = {}
+
+    async def __aenter__(self) -> "ObLogWriter":
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.close()
 
     def get_writer(self, channel: str, codec: Codec) -> Callable[[object], None]:
         """Get a write function for a channel with automatic encoding."""
@@ -26,7 +44,7 @@ class ObLog:
             raise ValueError(f"Channel '{channel}' already has a writer")
 
         self._codecs[channel] = codec
-        raw_writer = self.blob_log.get_writer(channel)
+        raw_writer = self._writer.get_writer(channel)
 
         # Write codec metadata as first record
         codec_bytes = pickle.dumps(codec)
@@ -38,6 +56,33 @@ class ObLog:
 
         return write
 
+    async def close(self) -> None:
+        """Close the underlying BlobLogWriter."""
+        await self._writer.close()
+
+
+class ObLogReader:
+    """Read-only object log directory with automatic decoding.
+
+    Wraps BlobLogReader to handle codec metadata and object deserialization.
+    The codec is auto-detected from the first record of each channel.
+    No explicit cleanup needed - resources are cleaned via finalizers.
+    
+    Example:
+        reader = ObLogReader(Path("logs"))
+        async for timestamp, obj in reader.read_channel("camera"):
+            process(obj)
+    """
+
+    def __init__(self, log_dir: Path):
+        """Initialize an ObLogReader.
+        
+        Args:
+            log_dir: Directory containing log files.
+        """
+        self._reader = BlobLogReader(log_dir)
+        self.log_dir = log_dir
+
     async def read_channel(self, channel: str) -> AsyncGenerator[tuple[int, object], None]:
         """Read a channel with automatic decoding.
 
@@ -48,7 +93,7 @@ class ObLog:
         codec = None
         record_num = 0
 
-        async for timestamp, data in self.blob_log.read_channel(channel):
+        async for timestamp, data in self._reader.read_channel(channel):
             if first:
                 codec = safe_unpickle_codec(bytes(data))
                 first = False
@@ -82,18 +127,18 @@ class ObLog:
             ValueError: If log file is empty or malformed.
 
         Example:
-            >>> oblog = ObLog(Path("logs"))
-            >>> codec = await oblog.read_codec("camera")
+            >>> reader = ObLogReader(Path("logs"))
+            >>> codec = await reader.read_codec("camera")
             >>> print(f"Camera uses codec: {type(codec).__name__}")
         """
-        async for _timestamp, data in self.blob_log.read_channel(channel):
+        async for _timestamp, data in self._reader.read_channel(channel):
             # First record is always the codec
             return safe_unpickle_codec(bytes(data))
         raise ValueError(f"Channel '{channel}' log file is empty")
 
-    async def close(self) -> None:
-        """Close the underlying BlobLog."""
-        await self.blob_log.close()
+    def channels(self) -> list[str]:
+        """List all available channels in this log directory."""
+        return self._reader.channels()
 
 
 class Codec[T]:

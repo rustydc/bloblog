@@ -5,7 +5,7 @@ import asyncio
 import numpy as np
 import pytest
 
-from tinman import ObLog
+from tinman import ObLogWriter, ObLogReader
 from tinman.codecs import NumpyArrayCodec
 
 
@@ -15,11 +15,10 @@ def test_numpy_codec_write_small(benchmark, tmp_path):
     arr = np.random.rand(128).astype(np.float64)  # 1KB
 
     async def write_arrays():
-        oblog = ObLog(tmp_path)
-        write = oblog.get_writer("test", NumpyArrayCodec())
-        for _ in range(100):
-            write(arr)
-        await oblog.close()
+        async with ObLogWriter(tmp_path) as oblog:
+            write = oblog.get_writer("test", NumpyArrayCodec())
+            for _ in range(100):
+                write(arr)
 
     benchmark(lambda: asyncio.run(write_arrays()))
 
@@ -30,11 +29,10 @@ def test_numpy_codec_write_large(benchmark, tmp_path):
     arr = np.random.rand(128, 1024).astype(np.float64)  # 1MB
 
     async def write_arrays():
-        oblog = ObLog(tmp_path)
-        write = oblog.get_writer("test", NumpyArrayCodec())
-        for _ in range(10):
-            write(arr)
-        await oblog.close()
+        async with ObLogWriter(tmp_path) as oblog:
+            write = oblog.get_writer("test", NumpyArrayCodec())
+            for _ in range(10):
+                write(arr)
 
     benchmark(lambda: asyncio.run(write_arrays()))
 
@@ -45,20 +43,18 @@ def test_numpy_codec_read_small(benchmark, tmp_path):
     arr = np.random.rand(128).astype(np.float64)
 
     async def setup():
-        oblog = ObLog(tmp_path)
-        write = oblog.get_writer("test", NumpyArrayCodec())
-        for _ in range(100):
-            write(arr)
-        await oblog.close()
+        async with ObLogWriter(tmp_path) as oblog:
+            write = oblog.get_writer("test", NumpyArrayCodec())
+            for _ in range(100):
+                write(arr)
 
     asyncio.run(setup())
 
     async def read_arrays():
-        oblog = ObLog(tmp_path)
+        reader = ObLogReader(tmp_path)
         count = 0
-        async for _, _ in oblog.read_channel("test"):
+        async for _, _ in reader.read_channel("test"):
             count += 1
-        await oblog.close()
         return count
 
     benchmark(lambda: asyncio.run(read_arrays()))
@@ -70,20 +66,18 @@ def test_numpy_codec_read_large(benchmark, tmp_path):
     arr = np.random.rand(128, 1024).astype(np.float64)
 
     async def setup():
-        oblog = ObLog(tmp_path)
-        write = oblog.get_writer("test", NumpyArrayCodec())
-        for _ in range(10):
-            write(arr)
-        await oblog.close()
+        async with ObLogWriter(tmp_path) as oblog:
+            write = oblog.get_writer("test", NumpyArrayCodec())
+            for _ in range(10):
+                write(arr)
 
     asyncio.run(setup())
 
     async def read_arrays():
-        oblog = ObLog(tmp_path)
+        reader = ObLogReader(tmp_path)
         arrays = []
-        async for _, a in oblog.read_channel("test"):
+        async for _, a in reader.read_channel("test"):
             arrays.append(a)
-        await oblog.close()
         return len(arrays)
 
     benchmark(lambda: asyncio.run(read_arrays()))

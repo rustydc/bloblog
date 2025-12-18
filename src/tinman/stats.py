@@ -201,7 +201,7 @@ async def run_stats(
         -------------------------
         camera     100     30.00
     """
-    from .oblog import ObLog
+    from .oblog import ObLogReader
     
     log_dir = Path(log_dir)
     
@@ -220,12 +220,9 @@ async def run_stats(
     
     async def collect_channel(channel: str) -> None:
         """Collect stats for a single channel."""
-        oblog = ObLog(log_dir)
-        try:
-            async for timestamp, _item in oblog.read_channel(channel):
-                collector.record(channel, timestamp)
-        finally:
-            await oblog.close()
+        reader = ObLogReader(log_dir)
+        async for timestamp, _item in reader.read_channel(channel):
+            collector.record(channel, timestamp)
     
     async with asyncio.TaskGroup() as tg:
         for channel in channels:

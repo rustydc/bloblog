@@ -19,31 +19,27 @@ Zero-copy codec for NumPy arrays with memory-mapped reads.
 
 ```python
 from pathlib import Path
-from tinman import ObLog
+from tinman import ObLogWriter, ObLogReader
 from tinman.codecs import NumpyArrayCodec
 import numpy as np
 
 # Write arrays
-oblog = ObLog(Path("logs"))
-write = oblog.get_writer("sensor_data", NumpyArrayCodec())
+async with ObLogWriter(Path("logs")) as oblog:
+    write = oblog.get_writer("sensor_data", NumpyArrayCodec())
 
-for i in range(100):
-    data = np.random.rand(1000)
-    write(data)
-
-await oblog.close()
+    for i in range(100):
+        data = np.random.rand(1000)
+        write(data)
 
 # Read arrays (zero-copy!)
-oblog = ObLog(Path("logs"))
-async for timestamp, arr in oblog.read_channel("sensor_data"):
+reader = ObLogReader(Path("logs"))
+async for timestamp, arr in reader.read_channel("sensor_data"):
     # arr is a numpy array, but it's a VIEW into the mmap
     print(f"{timestamp}: {arr.mean()}")
     
     # Verify zero-copy
     print(f"Is view: {arr.base is not None}")  # True
     print(f"Read-only: {not arr.flags.writeable}")  # True
-
-await oblog.close()
 ```
 
 ### Format
@@ -81,18 +77,16 @@ All NumPy dtypes are supported:
 
 ```python
 # Log sensor data
-oblog = ObLog(Path("sensor_logs"))
-write = oblog.get_writer("temperature", NumpyArrayCodec())
+async with ObLogWriter(Path("sensor_logs")) as oblog:
+    write = oblog.get_writer("temperature", NumpyArrayCodec())
 
-for reading in sensor_readings:
-    write(np.array(reading))
-
-await oblog.close()
+    for reading in sensor_readings:
+        write(np.array(reading))
 
 # Analyze later (zero-copy!)
-oblog = ObLog(Path("sensor_logs"))
+reader = ObLogReader(Path("sensor_logs"))
 all_temps = []
-async for _, temps in oblog.read_channel("temperature"):
+async for _, temps in reader.read_channel("temperature"):
     all_temps.append(temps)
 
 # Concatenate into single array
@@ -109,7 +103,7 @@ print(f"Max: {temperatures.max()}")
 
 If you need to modify arrays, make a copy:
 ```python
-async for _, arr in oblog.read_channel("data"):
+async for _, arr in reader.read_channel("data"):
     mutable_arr = arr.copy()  # Now you can modify it
     mutable_arr[0] = 42
 ```
@@ -130,29 +124,27 @@ Zero-copy codec for pandas DataFrames with memory-mapped reads.
 
 ```python
 from pathlib import Path
-from tinman import ObLog
+from tinman import ObLogWriter, ObLogReader
 from tinman.codecs import DataFrameCodec
 import pandas as pd
 import numpy as np
 
 # Write sensor data
-oblog = ObLog(Path("sensor_logs"))
-write = oblog.get_writer("readings", DataFrameCodec())
+async with ObLogWriter(Path("sensor_logs")) as oblog:
+    write = oblog.get_writer("readings", DataFrameCodec())
 
-df = pd.DataFrame({
-    'timestamp': np.arange(1000, dtype=np.int64),
-    'temperature': 20.0 + np.random.randn(1000) * 2,
-    'humidity': 65.0 + np.random.randn(1000) * 5,
-})
-write(df)
-await oblog.close()
+    df = pd.DataFrame({
+        'timestamp': np.arange(1000, dtype=np.int64),
+        'temperature': 20.0 + np.random.randn(1000) * 2,
+        'humidity': 65.0 + np.random.randn(1000) * 5,
+    })
+    write(df)
 
 # Read with zero-copy
-oblog = ObLog(Path("sensor_logs"))
-async for _, df in oblog.read_channel("readings"):
+reader = ObLogReader(Path("sensor_logs"))
+async for _, df in reader.read_channel("readings"):
     print(f"Mean temp: {df['temperature'].mean()}")
     # Columns are views!
-await oblog.close()
 ```
 
 ### DataFrameParquetCodec

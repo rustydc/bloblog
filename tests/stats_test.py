@@ -146,16 +146,15 @@ class TestRunStats:
     @pytest.mark.asyncio
     async def test_with_log_files(self, tmp_path: Path):
         """Reads and reports stats from log files."""
-        from tinman import ObLog
+        from tinman import ObLogWriter
         from tinman.codecs import StringCodec
         
         # Create a test log
-        oblog = ObLog(tmp_path)
-        write = oblog.get_writer("test_channel", StringCodec())
-        write("message1")
-        write("message2")
-        write("message3")
-        await oblog.close()
+        async with ObLogWriter(tmp_path) as oblog:
+            write = oblog.get_writer("test_channel", StringCodec())
+            write("message1")
+            write("message2")
+            write("message3")
         
         # Run stats
         output = io.StringIO()

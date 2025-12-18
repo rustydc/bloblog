@@ -46,19 +46,17 @@ Fast, simple binary log format: `(timestamp_ns: u64, length: u64, data: bytes)`.
 
 ```python
 from pathlib import Path
-from tinman.bloblog import BlobLog
+from tinman.bloblog import BlobLogWriter, BlobLogReader
 
 # Write
-blob = BlobLog(Path("logs"))
-write = blob.get_writer("sensor_data")
-write(b"raw bytes")  # Timestamp added automatically
-await blob.close()
+async with BlobLogWriter(Path("logs")) as writer:
+    write = writer.get_writer("sensor_data")
+    write(b"raw bytes")  # Timestamp added automatically
 
 # Read
-blob = BlobLog(Path("logs"))
-async for timestamp, data in blob.read_channel("sensor_data"):
+reader = BlobLogReader(Path("logs"))
+async for timestamp, data in reader.read_channel("sensor_data"):
     print(f"{timestamp}: {len(data)} bytes")
-await blob.close()
 ```
 
 **Key features:**
@@ -75,7 +73,7 @@ Adds codec system on top of BlobLog for automatic encoding/decoding of messages.
 
 ```python
 from pathlib import Path
-from tinman.oblog import Codec, ObLog
+from tinman.oblog import Codec, ObLogWriter, ObLogReader
 import heapq
 from collections import Counter
 
@@ -94,16 +92,14 @@ class HuffmanCodec(Codec[str]):
         ...
 
 # Write: codec parameters (Huffman tree) stored as first record
-oblog = ObLog(Path("logs"))
-write = oblog.get_writer("messages", HuffmanCodec("the quick brown fox..."))
-write("hello world")  # Compressed using codec's tree
-await oblog.close()
+async with ObLogWriter(Path("logs")) as oblog:
+    write = oblog.get_writer("messages", HuffmanCodec("the quick brown fox..."))
+    write("hello world")  # Compressed using codec's tree
 
 # Read: codec auto-restored from first record with exact same tree
-oblog = ObLog(Path("logs"))
-async for timestamp, text in oblog.read_channel("messages"):
+reader = ObLogReader(Path("logs"))
+async for timestamp, text in reader.read_channel("messages"):
     print(text)  # Decompressed correctly - "hello world"
-await oblog.close()
 ```
 
 - On read, codec is unpickled (with security restrictions) and used to decode remaining records
@@ -124,16 +120,17 @@ async def producer(out: Annotated[Out[dict], "data"]):
 **Built-in Codecs:**
 ```python
 from tinman.codecs import NumpyArrayCodec
+from tinman import ObLogWriter, ObLogReader
 import numpy as np
 
 # Zero-copy NumPy arrays (3x faster than pickle!)
-oblog = ObLog(Path("logs"))
-write = oblog.get_writer("sensor_data", NumpyArrayCodec())
-write(np.random.rand(1000, 1000))  # 7.6 MB array
-await oblog.close()
+async with ObLogWriter(Path("logs")) as oblog:
+    write = oblog.get_writer("sensor_data", NumpyArrayCodec())
+    write(np.random.rand(1000, 1000))  # 7.6 MB array
 
 # Read with zero-copy (arrays are views into mmap)
-async for timestamp, arr in oblog.read_channel("sensor_data"):
+reader = ObLogReader(Path("logs"))
+async for timestamp, arr in reader.read_channel("sensor_data"):
     print(arr.mean())  # No copy! Array is a view
 ```
 

@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tinman import ObLog
+from tinman import ObLogWriter, ObLogReader
 from tinman.codecs import DataFrameCodec
 
 
@@ -71,22 +71,20 @@ class TestDataFrameCodec:
             log_dir = Path(tmpdir)
             
             # Write
-            oblog = ObLog(log_dir)
-            write = oblog.get_writer("metrics", DataFrameCodec())
-            
-            df1 = pd.DataFrame({'a': [1, 2], 'b': [3.0, 4.0]})
-            df2 = pd.DataFrame({'a': [5, 6], 'b': [7.0, 8.0]})
-            
-            write(df1)
-            write(df2)
-            await oblog.close()
+            async with ObLogWriter(log_dir) as oblog:
+                write = oblog.get_writer("metrics", DataFrameCodec())
+                
+                df1 = pd.DataFrame({'a': [1, 2], 'b': [3.0, 4.0]})
+                df2 = pd.DataFrame({'a': [5, 6], 'b': [7.0, 8.0]})
+                
+                write(df1)
+                write(df2)
             
             # Read
-            oblog = ObLog(log_dir)
+            reader = ObLogReader(log_dir)
             results = []
-            async for timestamp, df in oblog.read_channel("metrics"):
+            async for timestamp, df in reader.read_channel("metrics"):
                 results.append(df)
-            await oblog.close()
             
             assert len(results) == 2
             pd.testing.assert_frame_equal(results[0], df1)
@@ -131,25 +129,23 @@ class TestDataFrameCodec:
             log_dir = Path(tmpdir)
             
             # Write
-            oblog = ObLog(log_dir)
-            write = oblog.get_writer("data", DataFrameCodec())
-            df = pd.DataFrame({
-                'x': np.array([1.0, 2.0, 3.0], dtype=np.float64),
-                'y': np.array([4, 5, 6], dtype=np.int32)
-            })
-            write(df)
-            await oblog.close()
+            async with ObLogWriter(log_dir) as oblog:
+                write = oblog.get_writer("data", DataFrameCodec())
+                df = pd.DataFrame({
+                    'x': np.array([1.0, 2.0, 3.0], dtype=np.float64),
+                    'y': np.array([4, 5, 6], dtype=np.int32)
+                })
+                write(df)
             
             # Read
-            oblog = ObLog(log_dir)
-            async for _, df in oblog.read_channel("data"):
+            reader = ObLogReader(log_dir)
+            async for _, df in reader.read_channel("data"):
                 # Numeric columns should be views
                 for col in df.columns:
                     arr = df[col].values
                     assert arr.base is not None, f"Column '{col}' should be a view"
                     if hasattr(arr, 'flags'):
                         assert not arr.flags.writeable, f"Column '{col}' should be read-only"
-            await oblog.close()
 
     def test_data_integrity(self):
         """Test that decoded data is bit-for-bit identical."""

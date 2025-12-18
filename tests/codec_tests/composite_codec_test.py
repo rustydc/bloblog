@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 import numpy as np
 import pytest
 
-from tinman import ObLog
+from tinman import ObLogWriter, ObLogReader
 from tinman.codecs import (
     BoolCodec,
     DictCodec,
@@ -175,29 +175,26 @@ class TestDictCodec:
             }
             codec = DictCodec(schema)
 
-            oblog = ObLog(log_dir)
-            write = oblog.get_writer("records", codec)
+            async with ObLogWriter(log_dir) as oblog:
+                write = oblog.get_writer("records", codec)
 
-            records = [
-                {"data": np.array([1, 2, 3]), "label": "first"},
-                {"data": np.array([4, 5, 6]), "label": "second"},
-            ]
+                records = [
+                    {"data": np.array([1, 2, 3]), "label": "first"},
+                    {"data": np.array([4, 5, 6]), "label": "second"},
+                ]
 
-            for record in records:
-                write(record)
+                for record in records:
+                    write(record)
 
-            await oblog.close()
-
-            # Read
-            oblog = ObLog(log_dir)
+            # Read (no context manager needed)
+            reader = ObLogReader(log_dir)
             read_records = []
-            async for _, record in oblog.read_channel("records"):
+            async for _, record in reader.read_channel("records"):
                 # Copy arrays to detach from mmap
                 read_records.append({
                     "data": record["data"].copy(),
                     "label": record["label"],
                 })
-            await oblog.close()
 
             # Verify
             assert len(read_records) == len(records)

@@ -45,7 +45,8 @@ reading = SensorReading(
 write(reading)
 
 # Read back as type-safe dataclass instances
-async for _, reading in oblog.read_channel("sensors"):
+reader = ObLogReader(Path("logs"))
+async for _, reading in reader.read_channel("sensors"):
     print(reading.data)        # Attribute access (IDE autocomplete!)
     print(reading.label)       # Type checker validates
     print(reading.confidence)  # Self-documenting
@@ -154,7 +155,8 @@ write({"success": 1})  # error key missing - encoded as length=0
 write({"success": 0, "error": "Timeout"})  # error key present
 
 # On decode, missing keys are not in the result dict
-async for _, record in oblog.read_channel("results"):
+reader = ObLogReader(Path("logs"))
+async for _, record in reader.read_channel("results"):
     if 'error' in record:
         print(record['error'])  # Only present if it was written
 ```
@@ -202,7 +204,8 @@ write(data)
 
 ```python
 # After reading
-async for _, data in oblog.read_channel("training"):
+reader = ObLogReader(Path("logs"))
+async for _, data in reader.read_channel("training"):
     # data['train_batch'] is a list
     # Each array in the list is a zero-copy view!
     for arr in data['train_batch']:
@@ -221,7 +224,7 @@ This means:
 import asyncio
 from pathlib import Path
 import numpy as np
-from tinman import ObLog
+from tinman import ObLogWriter, ObLogReader
 from tinman.codecs import (
     DictCodec,
     ListCodec,
@@ -243,29 +246,25 @@ async def main():
     codec = DictCodec(schema)
     
     # Write
-    oblog = ObLog(Path("logs"))
-    write = oblog.get_writer("sensors", codec)
-    
-    write({
-        "accelerometer": np.random.rand(100, 3),
-        "gyroscope": np.random.rand(100, 3),
-        "timestamp": 1000000,
-        "device_id": "sensor_0",
-        "temperature": 25.3,
-    })
-    
-    await oblog.close()
+    async with ObLogWriter(Path("logs")) as oblog:
+        write = oblog.get_writer("sensors", codec)
+        
+        write({
+            "accelerometer": np.random.rand(100, 3),
+            "gyroscope": np.random.rand(100, 3),
+            "timestamp": 1000000,
+            "device_id": "sensor_0",
+            "temperature": 25.3,
+        })
     
     # Read (zero-copy for arrays!)
-    oblog = ObLog(Path("logs"))
-    async for timestamp, reading in oblog.read_channel("sensors"):
+    reader = ObLogReader(Path("logs"))
+    async for timestamp, reading in reader.read_channel("sensors"):
         print(f"Device {reading['device_id']}")
         print(f"  Accel: {reading['accelerometer'].shape}")
         print(f"  Gyro: {reading['gyroscope'].shape}")
         # Arrays are read-only views - no memory allocated!
         assert not reading['accelerometer'].flags.writeable
-    
-    await oblog.close()
 
 asyncio.run(main())
 ```
