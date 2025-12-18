@@ -302,6 +302,160 @@ def playback(
 
 
 @app.command
+def logs(
+    *,
+    from_: Annotated[Path, cyclopts.Parameter(name=["--from", "-f"])],
+    channel: str = "logs",
+    speed: float = float('inf'),
+    node: str | None = None,
+    level: str = "DEBUG",
+) -> None:
+    """Play back recorded log messages.
+
+    This command reads log entries from a recorded log directory and prints them
+    with colored formatting. Useful for reviewing what happened during a previous run.
+
+    Parameters
+    ----------
+    from_
+        Directory containing log files.
+    channel
+        Name of the logs channel. Default: "logs".
+    speed
+        Playback speed. Use 'inf' (default) for instant playback, or 1.0 for
+        real-time playback that respects original timing.
+    node
+        Filter to show only logs from a specific node name.
+    level
+        Minimum log level to show (DEBUG, INFO, WARNING, ERROR, CRITICAL).
+        Default: DEBUG (show all).
+
+    Examples
+    --------
+    $ tinman logs --from logs/
+    $ tinman logs --from logs/ --speed 1.0
+    $ tinman logs --from logs/ --node data_processor
+    $ tinman logs --from logs/ --level WARNING
+    """
+    from .logging import LogEntry, create_log_printer
+    from .oblog import ObLogReader
+    
+    min_level = getattr(logging, level.upper(), logging.DEBUG)
+    
+    async def _logs() -> None:
+        log_file = from_ / f"{channel}.blog"
+        if not log_file.exists():
+            print(f"No log file found: {log_file}", file=sys.stderr)
+            sys.exit(1)
+        
+        # For instant playback, just read and print directly
+        if speed == float('inf'):
+            reader = ObLogReader(from_)
+            from datetime import datetime
+            from rich.console import Console
+            from rich.text import Text
+            import logging as log_module
+            
+            LEVEL_STYLES = {
+                log_module.DEBUG: "dim",
+                log_module.INFO: "green",
+                log_module.WARNING: "yellow",
+                log_module.ERROR: "red",
+                log_module.CRITICAL: "red bold",
+            }
+            console = Console()
+            
+            async for _ts, entry in reader.read_channel(channel):
+                entry: LogEntry  # type: ignore[no-redef]
+                # Apply filters
+                if node is not None and entry.node_name != node:
+                    continue
+                if entry.level < min_level:
+                    continue
+                    
+                level_name = log_module.getLevelName(entry.level)
+                style = LEVEL_STYLES.get(entry.level, "white")
+                timestamp = datetime.fromtimestamp(entry.timestamp_ns / 1_000_000_000)
+                time_str = timestamp.strftime("%H:%M:%S.%f")
+                
+                text = Text()
+                text.append(time_str, style="dim")
+                text.append(" ")
+                text.append(f"[{level_name:8}]", style=style)
+                if entry.node_name:
+                    text.append(f"[{entry.node_name}] ", style="cyan")
+                else:
+                    text.append(" ")
+                text.append(f"{entry.name}: {entry.message}")
+                console.print(text)
+                
+                if entry.exc_text:
+                    console.print(Text(entry.exc_text, style="red"))
+        else:
+            # For timed playback, use the full playback infrastructure
+            from .launcher import playback
+            from .pubsub import In
+            from .runtime import NodeSpec
+            
+            # Create a filtered log printer
+            from datetime import datetime
+            from rich.console import Console
+            from rich.text import Text
+            import logging as log_module
+            
+            LEVEL_STYLES = {
+                log_module.DEBUG: "dim",
+                log_module.INFO: "green",
+                log_module.WARNING: "yellow",
+                log_module.ERROR: "red",
+                log_module.CRITICAL: "red bold",
+            }
+            console = Console()
+            
+            async def filtered_log_printer(logs_in: In[LogEntry]) -> None:
+                async for entry in logs_in:
+                    # Apply filters
+                    if node is not None and entry.node_name != node:
+                        continue
+                    if entry.level < min_level:
+                        continue
+                    
+                    level_name = log_module.getLevelName(entry.level)
+                    style = LEVEL_STYLES.get(entry.level, "white")
+                    timestamp = datetime.fromtimestamp(entry.timestamp_ns / 1_000_000_000)
+                    time_str = timestamp.strftime("%H:%M:%S.%f")
+                    
+                    text = Text()
+                    text.append(time_str, style="dim")
+                    text.append(" ")
+                    text.append(f"[{level_name:8}]", style=style)
+                    if entry.node_name:
+                        text.append(f"[{entry.node_name}] ", style="cyan")
+                    else:
+                        text.append(" ")
+                    text.append(f"{entry.name}: {entry.message}")
+                    console.print(text)
+                    
+                    if entry.exc_text:
+                        console.print(Text(entry.exc_text, style="red"))
+            
+            printer_spec = NodeSpec(
+                node_fn=filtered_log_printer,
+                inputs={"logs_in": (channel, 100)},
+                outputs={},
+                daemon=True,
+            )
+            await playback(
+                [printer_spec], 
+                from_, 
+                speed=speed, 
+                use_virtual_time_logs=False,  # We're reading recorded logs, not capturing new ones
+            )
+    
+    asyncio.run(_logs())
+
+
+@app.command
 def stats(
     *,
     from_: Annotated[Path, cyclopts.Parameter(name=["--from", "-f"])],
