@@ -5,6 +5,7 @@ from .oblog import enable_pickle_codec as enable_pickle_codec
 from .pubsub import In as In
 from .pubsub import Out as Out
 from .runtime import NodeSpec as NodeSpec
+from .runtime import ShutdownRequested as ShutdownRequested
 from .runtime import daemon as daemon
 from .runtime import get_node_specs as get_node_specs
 from .runtime import validate_nodes as validate_nodes

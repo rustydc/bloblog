@@ -3,13 +3,29 @@
 This module contains the core runtime for executing graphs of async nodes.
 It handles channel wiring, subscription management, and concurrent execution.
 
-For high-level utilities like logging and playback, see run.py.
+Shutdown behavior:
+- External shutdown (SIGINT/SIGTERM): All nodes are cancelled gracefully
+- Natural completion: When all non-daemon nodes complete, daemons are cancelled
+- Error in any node: All nodes are cancelled (TaskGroup semantics)
+
+Nodes should be cancellation-safe. Use try/finally for cleanup:
+
+    async def my_node(input: In[T], output: Out[T]) -> None:
+        try:
+            async for item in input:
+                await output.publish(process(item))
+        except asyncio.CancelledError:
+            # Optional: log cancellation
+            raise  # Always re-raise
+
+For high-level utilities like logging and playback, see launcher.py.
 """
 
 from __future__ import annotations
 
 import asyncio
 import inspect
+import signal
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Annotated, Any, get_args, get_origin, get_type_hints
@@ -17,6 +33,10 @@ from typing import Annotated, Any, get_args, get_origin, get_type_hints
 from .oblog import Codec, PickleCodec
 from .pubsub import In, Out
 from .timer import Timer, ScaledTimer
+
+
+# Default timeout for graceful shutdown before force-cancelling
+DEFAULT_SHUTDOWN_TIMEOUT = 5.0
 
 
 @dataclass
@@ -34,7 +54,8 @@ class NodeSpec:
         timer_param: Parameter name for Timer injection (or None)
         daemon: If True, node is cancelled when all non-daemon nodes complete.
                 Useful for auxiliary nodes like log capture that should not
-                block shutdown.
+                block shutdown. Daemon nodes are also cancelled on external
+                shutdown (SIGINT/SIGTERM) along with all other nodes.
     """
 
     node_fn: Callable
@@ -43,6 +64,18 @@ class NodeSpec:
     all_channels_param: str | None = None  # Parameter name for dict[str, In] injection
     timer_param: str | None = None  # Parameter name for Timer injection
     daemon: bool = False  # If True, cancelled when non-daemon nodes complete
+
+
+class ShutdownRequested(Exception):
+    """Exception for signal-based shutdown (kept for potential future use).
+    
+    Note: run_nodes() now swallows this and returns normally on SIGINT/SIGTERM,
+    treating signal-based shutdown as a clean exit rather than an error.
+    
+    This class is still exported in case users want to manually trigger
+    shutdown semantics or for future extensions.
+    """
+    pass
 
 
 def daemon[F: Callable](node_fn: F) -> F:
@@ -300,11 +333,21 @@ def validate_nodes(nodes: Sequence[Callable | NodeSpec]) -> None:
 async def run_nodes(
     nodes: Sequence[Callable[..., Awaitable[Any]] | NodeSpec],
     timer: Timer | None = None,
+    shutdown_timeout: float = DEFAULT_SHUTDOWN_TIMEOUT,
+    install_signal_handlers: bool = True,
 ) -> None:
     """Run a graph of nodes, wiring their channels and executing them concurrently.
 
     This is the core execution engine that wires together async nodes based on
     their channel annotations, then executes them concurrently.
+
+    Shutdown behavior:
+    - SIGINT/SIGTERM: All nodes are cancelled gracefully, then returns normally
+    - Natural completion: When all non-daemon nodes complete, daemons are cancelled
+    - Any node raises: All nodes are cancelled, exception propagates
+    - External cancellation: CancelledError propagates after cleanup
+
+    Nodes should be cancellation-safe. Use try/finally for cleanup.
 
     Args:
         nodes: List of async callables (functions, bound methods, or NodeSpec objects).
@@ -315,19 +358,28 @@ async def run_nodes(
                - Timer: Timer (for time access)
         timer: Optional Timer instance to inject into nodes that request it.
                If None, a default ScaledTimer (real-time) is created.
+        shutdown_timeout: Seconds to wait for graceful shutdown before force-cancelling.
+               Default is 5.0 seconds.
+        install_signal_handlers: If True, install SIGINT/SIGTERM handlers for graceful
+               shutdown. Set to False when running in contexts that manage their own
+               signals (e.g., pytest, nested event loops). Default is True.
 
     Raises:
         TypeError: If nodes are not async callables.
         ValueError: If channel configuration is invalid (e.g., missing input producers).
+        asyncio.CancelledError: If the caller cancels the run_nodes task.
 
     Example:
-        >>> # Simple pipeline
+        >>> # Simple pipeline - Ctrl+C returns cleanly
         >>> await run_nodes([producer, consumer])
 
         >>> # With custom timer
         >>> clock = VirtualClock()
         >>> timer = FastForwardTimer(clock)
         >>> await run_nodes([producer, consumer], timer=timer)
+        
+        >>> # In tests (no signal handlers)
+        >>> await run_nodes([producer, consumer], install_signal_handlers=False)
     """
     # Create default timer if not provided
     if timer is None:
@@ -408,35 +460,137 @@ async def run_nodes(
     daemon_specs = [s for s in specs if s.daemon]
     main_specs = [s for s in specs if not s.daemon]
 
-    # Execute nodes: daemons are cancelled when main nodes complete
-    daemon_tasks: list[asyncio.Task] = []
+    # Track all tasks for shutdown
+    all_tasks: list[asyncio.Task] = []
+    shutdown_event = asyncio.Event()
     
-    async def cancel_daemon_tasks():
-        """Cancel daemons after main nodes complete."""
-        for task in daemon_tasks:
-            if not task.done():
-                task.cancel()
-        if daemon_tasks:
-            await asyncio.gather(*daemon_tasks, return_exceptions=True)
+    async def graceful_shutdown(reason: str = "shutdown requested") -> None:
+        """Signal shutdown - tasks will be cancelled by the main loop."""
+        if shutdown_event.is_set():
+            return  # Already shutting down
+        shutdown_event.set()
+
+    # Set up signal handlers if requested
+    loop = asyncio.get_running_loop()
+    
+    def handle_signal() -> None:
+        """Handle shutdown signals by triggering graceful shutdown."""
+        if not shutdown_event.is_set():
+            shutdown_event.set()
+
+    if install_signal_handlers:
+        try:
+            # Use asyncio's signal handling - more reliable than signal.signal()
+            # as it properly integrates with the event loop
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, handle_signal)
+        except (ValueError, OSError, NotImplementedError):
+            # Can't set signal handlers (e.g., not main thread, or Windows)
+            pass
+
+    async def wait_with_shutdown(tasks: list[asyncio.Task]) -> None:
+        """Wait for tasks to complete, but respond to shutdown signal."""
+        if not tasks:
+            return
+            
+        # Create a task that completes when shutdown is signaled
+        shutdown_waiter = asyncio.create_task(shutdown_event.wait())
+        
+        try:
+            # Wait for either all tasks to complete OR shutdown signal
+            task_set = set(tasks)
+            task_set.add(shutdown_waiter)
+            
+            while task_set - {shutdown_waiter}:  # While there are real tasks
+                done, pending = await asyncio.wait(
+                    task_set,
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                
+                # Check if shutdown was signaled
+                if shutdown_waiter in done:
+                    # Cancel all remaining tasks
+                    for task in pending:
+                        if task is not shutdown_waiter:
+                            task.cancel()
+                    # Wait briefly for cancellation
+                    if pending - {shutdown_waiter}:
+                        await asyncio.wait(pending - {shutdown_waiter}, timeout=shutdown_timeout)
+                    return
+                
+                # Remove completed tasks
+                task_set = pending
+                task_set.add(shutdown_waiter)  # Keep the shutdown waiter
+                
+                # Check for exceptions in done tasks
+                for task in done:
+                    if task is not shutdown_waiter and task.exception() is not None:
+                        # Cancel remaining tasks and re-raise
+                        for t in pending:
+                            t.cancel()
+                        if pending:
+                            await asyncio.wait(pending, timeout=shutdown_timeout)
+                        task.result()  # This will raise the exception
+        finally:
+            shutdown_waiter.cancel()
+            try:
+                await shutdown_waiter
+            except asyncio.CancelledError:
+                pass
 
     try:
         # Start daemon nodes
         for spec in daemon_specs:
             task = asyncio.create_task(run_node_and_close(spec.node_fn))
-            daemon_tasks.append(task)
+            all_tasks.append(task)
 
-        # Run main nodes to completion
-        if main_specs:
-            async with asyncio.TaskGroup() as tg:
-                for spec in main_specs:
-                    tg.create_task(run_node_and_close(spec.node_fn))
-        
-        # Main nodes done - cancel daemons
-        await cancel_daemon_tasks()
-    except BaseException:
-        # On any error, ensure we clean up
-        for task in daemon_tasks:
+        # Start main nodes
+        main_tasks: list[asyncio.Task] = []
+        for spec in main_specs:
+            task = asyncio.create_task(run_node_and_close(spec.node_fn))
+            all_tasks.append(task)
+            main_tasks.append(task)
+
+        # Wait for main nodes to complete (or shutdown signal)
+        await wait_with_shutdown(main_tasks)
+
+        # Main nodes done - give daemons a brief moment to finish naturally
+        # (they should see _CLOSED on their inputs and exit)
+        daemon_tasks = [t for t in all_tasks if t not in main_tasks]
+        if daemon_tasks:
+            # Wait briefly for daemons to complete naturally (they should finish
+            # quickly once their inputs close)
+            done, pending = await asyncio.wait(daemon_tasks, timeout=0.1)
+            
+            # Cancel any still running
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+                
+        # Signal-based shutdown is a clean exit - just return normally
+            
+    except asyncio.CancelledError:
+        # External cancellation (caller cancelled the task) - cancel all and re-raise
+        shutdown_event.set()
+        for task in all_tasks:
             if not task.done():
                 task.cancel()
-        await asyncio.gather(*daemon_tasks, return_exceptions=True)
+        await asyncio.gather(*all_tasks, return_exceptions=True)
         raise
+    except Exception:
+        # On any error, clean up all tasks
+        shutdown_event.set()
+        for task in all_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*all_tasks, return_exceptions=True)
+        raise
+    finally:
+        # Remove signal handlers
+        if install_signal_handlers:
+            try:
+                for sig in (signal.SIGINT, signal.SIGTERM):
+                    loop.remove_signal_handler(sig)
+            except (ValueError, OSError, NotImplementedError):
+                pass

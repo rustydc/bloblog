@@ -4,7 +4,7 @@ import asyncio
 import pytest
 from .test_utils import StringCodec, make_consumer_node, make_producer_node
 
-from tinman import In, Out, get_node_specs, validate_nodes
+from tinman import In, Out, get_node_specs, validate_nodes, daemon
 from tinman.oblog import PickleCodec
 from typing import Annotated
 
@@ -278,3 +278,110 @@ class TestDaemonNodes:
         
         assert main_completed
         assert daemon_cancelled
+
+
+class TestShutdown:
+    """Tests for graceful shutdown behavior."""
+    
+    @pytest.mark.asyncio
+    async def test_external_cancellation_cancels_all_nodes(self):
+        """Test that external cancellation triggers cleanup of all nodes."""
+        from tinman.runtime import run_nodes
+        
+        main_cancelled = False
+        daemon_cancelled = False
+        
+        async def main_node(out: Annotated[Out[str], "data", StringCodec()]) -> None:
+            nonlocal main_cancelled
+            try:
+                while True:
+                    await out.publish("hello")
+                    await asyncio.sleep(0.1)
+            except asyncio.CancelledError:
+                main_cancelled = True
+                raise
+        
+        @daemon
+        async def daemon_node(out: Annotated[Out[str], "daemon_data", StringCodec()]) -> None:
+            nonlocal daemon_cancelled
+            try:
+                while True:
+                    await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                daemon_cancelled = True
+                raise
+        
+        consumer, _ = make_consumer_node("data", 3)
+        
+        # Start run_nodes and cancel it externally
+        task = asyncio.create_task(
+            run_nodes([main_node, consumer, daemon_node], install_signal_handlers=False)
+        )
+        
+        # Give it time to start
+        await asyncio.sleep(0.05)
+        
+        # External cancellation
+        task.cancel()
+        
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        
+        assert main_cancelled
+        assert daemon_cancelled
+    
+    @pytest.mark.asyncio
+    async def test_node_error_cancels_other_nodes(self):
+        """Test that an error in one node cancels others."""
+        from tinman.runtime import run_nodes
+        
+        other_cancelled = False
+        
+        async def error_node(out: Annotated[Out[str], "error_data", StringCodec()]) -> None:
+            await asyncio.sleep(0.01)
+            raise ValueError("intentional error")
+        
+        async def slow_node(out: Annotated[Out[str], "slow_data", StringCodec()]) -> None:
+            nonlocal other_cancelled
+            try:
+                while True:
+                    await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                other_cancelled = True
+                raise
+        
+        with pytest.raises(ValueError, match="intentional error"):
+            await run_nodes([error_node, slow_node], install_signal_handlers=False)
+        
+        # The other node should have been cancelled during cleanup
+        assert other_cancelled
+    
+    @pytest.mark.asyncio
+    async def test_shutdown_timeout_parameter(self):
+        """Test that shutdown_timeout parameter is accepted."""
+        from tinman.runtime import run_nodes
+        
+        async def quick_node(out: Annotated[Out[str], "data", StringCodec()]) -> None:
+            await out.publish("done")
+        
+        consumer, _ = make_consumer_node("data", 1)
+        
+        # Should complete without error with custom timeout
+        await run_nodes(
+            [quick_node, consumer], 
+            install_signal_handlers=False,
+            shutdown_timeout=1.0
+        )
+    
+    @pytest.mark.asyncio
+    async def test_install_signal_handlers_false_in_tests(self):
+        """Test that signal handlers can be disabled (important for tests)."""
+        from tinman.runtime import run_nodes
+        
+        async def quick_node(out: Annotated[Out[str], "data", StringCodec()]) -> None:
+            await out.publish("done")
+        
+        consumer, _ = make_consumer_node("data", 1)
+        
+        # Should work without signal handlers
+        await run_nodes([quick_node, consumer], install_signal_handlers=False)
