@@ -12,8 +12,10 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import shutil
 import sys
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -31,6 +33,53 @@ app = cyclopts.App(
     name="tinman",
     help="A minimal async framework for data pipelines with logging and playback.",
 )
+
+
+# Default log directory management
+DEFAULT_LOG_BASE = Path.home() / ".tinman" / "logs"
+MAX_LOG_DIRS = 5
+
+
+def _get_default_log_dir() -> Path:
+    """Create a new timestamped log directory under ~/.tinman/logs/."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = DEFAULT_LOG_BASE / timestamp
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir
+
+
+def _cleanup_old_log_dirs() -> None:
+    """Remove old log directories, keeping only the most recent MAX_LOG_DIRS - 1.
+    
+    This is called before creating a new directory, so we keep 4 old ones
+    plus the new one = 5 total.
+    """
+    if not DEFAULT_LOG_BASE.exists():
+        return
+    
+    # Get all directories sorted by name (which is timestamp, so oldest first)
+    dirs = sorted(
+        [d for d in DEFAULT_LOG_BASE.iterdir() if d.is_dir()],
+        key=lambda d: d.name
+    )
+    
+    # Remove all but the most recent (MAX_LOG_DIRS - 1)
+    dirs_to_remove = dirs[: -(MAX_LOG_DIRS - 1)] if len(dirs) >= MAX_LOG_DIRS else []
+    for d in dirs_to_remove:
+        shutil.rmtree(d)
+
+
+def _get_latest_log_dir() -> Path | None:
+    """Get the most recent log directory under ~/.tinman/logs/."""
+    if not DEFAULT_LOG_BASE.exists():
+        return None
+    
+    dirs = sorted(
+        [d for d in DEFAULT_LOG_BASE.iterdir() if d.is_dir()],
+        key=lambda d: d.name,
+        reverse=True
+    )
+    return dirs[0] if dirs else None
 
 
 def _resolve_attr(obj: object, name: str) -> object:
@@ -170,6 +219,7 @@ def run(
     nodes: tuple[str, ...],
     *,
     log_dir: Path | None = None,
+    no_log: bool = False,
     pickle: bool = False,
     capture_logs: bool = True,
     log_level: str = "INFO",
@@ -185,7 +235,9 @@ def run(
         One or more node specs in 'module:node1,node2' format.
         Multiple specs are combined into a single graph.
     log_dir
-        Directory to log all output channels.
+        Directory to log all output channels. Default: ~/.tinman/logs/TIMESTAMP/
+    no_log
+        Disable logging to disk entirely.
     pickle
         Enable PickleCodec for arbitrary Python objects (security risk with untrusted data).
     capture_logs
@@ -199,19 +251,30 @@ def run(
     stats
         Print channel statistics (message counts and Hz) on exit.
     graph
-        Output a Graphviz DOT file of the node graph and exit without running.
+        Output a Graphviz DOT file of the node graph.
 
     Examples
     --------
     $ tinman run myapp.nodes:producer,consumer
     $ tinman run myapp.sensors:camera myapp.processors:detector --log-dir logs/
-    $ tinman run myapp:nodes --log-dir logs/ --capture-logs
-    $ tinman run myapp:nodes --log-dir logs/ --capture-logs --log-level DEBUG
+    $ tinman run myapp:nodes --no-log  # disable logging
+    $ tinman run myapp:nodes --capture-logs --log-level DEBUG
     $ tinman run myapp:nodes --stats
     $ tinman run myapp:nodes --graph graph.dot
     """
     if pickle:
         enable_pickle_codec()
+    
+    # Determine log directory
+    if no_log:
+        effective_log_dir = None
+    elif log_dir is not None:
+        effective_log_dir = log_dir
+    else:
+        # Default: ~/.tinman/logs/TIMESTAMP/
+        _cleanup_old_log_dirs()
+        effective_log_dir = _get_default_log_dir()
+    
     node_list = load_nodes(nodes)
     
     # Build graph from user nodes
@@ -230,9 +293,9 @@ def run(
         if stats:
             g.nodes.append(create_stats_node(daemon=True))
         
-        # Add recording if log_dir specified
-        if log_dir is not None:
-            g.nodes.append(create_recording_node(log_dir, g.nodes))
+        # Add recording
+        if effective_log_dir is not None:
+            g.nodes.append(create_recording_node(effective_log_dir, g.nodes))
         
         # If --graph specified, output DOT
         if graph is not None:
@@ -245,7 +308,7 @@ def run(
 def playback(
     nodes: tuple[str, ...],
     *,
-    from_: Annotated[Path, cyclopts.Parameter(name=["--from", "-f"])],
+    from_: Annotated[Path | None, cyclopts.Parameter(name=["--from", "-f"])] = None,
     speed: float = float("inf"),
     log_dir: Path | None = None,
     pickle: bool = False,
@@ -264,7 +327,7 @@ def playback(
         One or more node specs in 'module:node1,node2' format.
         These consume channels from the recorded logs.
     from_
-        Directory containing log files to play back.
+        Directory containing log files to play back. Default: latest ~/.tinman/logs/
     speed
         Playback speed multiplier. Use 'inf' for fast-forward (default),
         1.0 for real-time, 2.0 for double speed, etc.
@@ -287,17 +350,24 @@ def playback(
     stats
         Print channel statistics (message counts and Hz) on exit.
     graph
-        Output a Graphviz DOT file of the node graph and exit without running.
+        Output a Graphviz DOT file of the node graph.
 
     Examples
     --------
+    $ tinman playback myapp:consumer  # uses latest ~/.tinman/logs/
     $ tinman playback myapp:consumer --from logs/
     $ tinman playback myapp:consumer --from logs/ --speed 1.0
     $ tinman playback myapp:transform --from logs/ --log-dir processed/
-    $ tinman playback myapp:consumer --from logs/ --capture-logs
-    $ tinman playback myapp:consumer --from logs/ --stats
-    $ tinman playback myapp:consumer --from logs/ --graph graph.dot
+    $ tinman playback myapp:consumer --stats
+    $ tinman playback myapp:consumer --graph graph.dot
     """
+    # Determine playback directory
+    if from_ is None:
+        from_ = _get_latest_log_dir()
+        if from_ is None:
+            print("Error: No log directory specified and no logs found in ~/.tinman/logs/", file=sys.stderr)
+            sys.exit(1)
+    
     if pickle:
         enable_pickle_codec()
     node_list = load_nodes(nodes)
@@ -345,7 +415,7 @@ def playback(
 @app.command
 def logs(
     *,
-    from_: Annotated[Path, cyclopts.Parameter(name=["--from", "-f"])],
+    from_: Annotated[Path | None, cyclopts.Parameter(name=["--from", "-f"])] = None,
     channel: str = "logs",
     speed: float = float('inf'),
     node: str | None = None,
@@ -359,7 +429,7 @@ def logs(
     Parameters
     ----------
     from_
-        Directory containing log files.
+        Directory containing log files. Default: latest ~/.tinman/logs/
     channel
         Name of the logs channel. Default: "logs".
     speed
@@ -373,11 +443,19 @@ def logs(
 
     Examples
     --------
+    $ tinman logs  # uses latest ~/.tinman/logs/
     $ tinman logs --from logs/
     $ tinman logs --from logs/ --speed 1.0
     $ tinman logs --from logs/ --node data_processor
     $ tinman logs --from logs/ --level WARNING
     """
+    # Determine playback directory
+    if from_ is None:
+        from_ = _get_latest_log_dir()
+        if from_ is None:
+            print("Error: No log directory specified and no logs found in ~/.tinman/logs/", file=sys.stderr)
+            sys.exit(1)
+    
     from .logging import LogEntry, create_log_printer
     from .oblog import ObLogReader
     
@@ -498,7 +576,7 @@ def logs(
 @app.command
 def stats(
     *,
-    from_: Annotated[Path, cyclopts.Parameter(name=["--from", "-f"])],
+    from_: Annotated[Path | None, cyclopts.Parameter(name=["--from", "-f"])] = None,
     pickle: bool = False,
 ) -> None:
     """Print channel statistics from recorded logs.
@@ -509,15 +587,23 @@ def stats(
     Parameters
     ----------
     from_
-        Directory containing log files to analyze.
+        Directory containing log files to analyze. Default: latest ~/.tinman/logs/
     pickle
         Enable PickleCodec for arbitrary Python objects (security risk with untrusted data).
 
     Examples
     --------
+    $ tinman stats  # uses latest ~/.tinman/logs/
     $ tinman stats --from logs/
     $ tinman stats -f webcam_logs/
     """
+    # Determine playback directory
+    if from_ is None:
+        from_ = _get_latest_log_dir()
+        if from_ is None:
+            print("Error: No log directory specified and no logs found in ~/.tinman/logs/", file=sys.stderr)
+            sys.exit(1)
+    
     from .stats import run_stats
     
     if pickle:
