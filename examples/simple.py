@@ -19,14 +19,11 @@ from tinman import In, Out
 
 # Example 1: Simple function node
 async def producer(output: Annotated[Out[str], "messages"]):
-    """Producer node - just a function!"""
-    print("Producer: Starting...")
-    for i in range(5):
+    for i in range(1, 6):
         msg = f"Message {i}"
         print(f"Producer: Sending '{msg}'")
         await output.publish(msg)
         await asyncio.sleep(0.5)
-    print("Producer: Done")
 
 
 # Example 2: Transform node
@@ -42,12 +39,8 @@ async def uppercase(
 async def consumer(
     input: Annotated[In[str], "uppercase"],
 ):
-    """Print received messages."""
-    print("Consumer: Starting...")
     async for msg in input:
         print(f"Consumer: Received '{msg}'")
-    print("Consumer: Done")
-
 
 # Pre-built pipeline for CLI usage
 pipeline = [producer, uppercase, consumer]
