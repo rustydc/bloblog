@@ -79,27 +79,81 @@ class TestStatsCollector:
         
         assert collector.channels["test"].count == 2
 
-    def test_format_stats_empty(self):
-        """Format returns message when no channels."""
+    def test_record_global_timestamps(self):
+        """Recording tracks global recorded timestamps."""
         collector = StatsCollector()
-        assert collector.format_stats() == "No channels recorded."
+        collector.record("ch1", 1_000_000_000)
+        collector.record("ch2", 2_000_000_000)
+        collector.record("ch1", 3_000_000_000)
+        
+        assert collector.first_recorded_ns == 1_000_000_000
+        assert collector.last_recorded_ns == 3_000_000_000
+        assert collector.recorded_duration_seconds == 2.0
 
-    def test_format_stats_with_data(self):
-        """Format produces table with header and data."""
+    def test_record_real_timestamps(self):
+        """Recording tracks global real timestamps."""
+        collector = StatsCollector()
+        collector.record("ch1", 1_000_000_000, real_time_ns=100_000_000)
+        collector.record("ch2", 2_000_000_000, real_time_ns=200_000_000)
+        
+        assert collector.first_real_ns == 100_000_000
+        assert collector.last_real_ns == 200_000_000
+        assert collector.real_duration_seconds == 0.1
+
+    def test_speed_multiple(self):
+        """Speed multiple is recorded_duration / real_duration."""
+        collector = StatsCollector()
+        # 10 seconds of recorded time, 1 second of real time = 10x speed
+        collector.record("ch1", 0, real_time_ns=0)
+        collector.record("ch1", 10_000_000_000, real_time_ns=1_000_000_000)
+        
+        assert collector.speed_multiple == pytest.approx(10.0)
+
+    def test_speed_multiple_no_real_time(self):
+        """Speed multiple is None when real time not tracked."""
+        collector = StatsCollector()
+        collector.record("ch1", 0)
+        collector.record("ch1", 10_000_000_000)
+        
+        assert collector.speed_multiple is None
+
+    def test_print_stats_empty(self):
+        """print_stats shows message when no channels."""
+        collector = StatsCollector()
+        output = io.StringIO()
+        collector.print_stats(file=output)
+        assert "No channels recorded." in output.getvalue()
+
+    def test_print_stats_with_data(self):
+        """print_stats produces table with header and data."""
         collector = StatsCollector()
         collector.record("camera", 0)
         collector.record("camera", 100_000_000)
         collector.record("lidar", 0)
         
-        output = collector.format_stats()
+        output = io.StringIO()
+        collector.print_stats(file=output)
+        result = output.getvalue()
         
-        assert "Channel" in output
-        assert "Count" in output
-        assert "Hz" in output
-        assert "camera" in output
-        assert "lidar" in output
-        assert "2" in output  # camera count
-        assert "1" in output  # lidar count
+        assert "Channel" in result
+        assert "Count" in result
+        assert "Hz" in result
+        assert "camera" in result
+        assert "lidar" in result
+
+    def test_print_stats_with_real_time(self):
+        """print_stats includes real-time stats when available."""
+        collector = StatsCollector()
+        # 10 seconds recorded, 1 second real = 10x speed
+        collector.record("test", 0, real_time_ns=0)
+        collector.record("test", 10_000_000_000, real_time_ns=1_000_000_000)
+        
+        output = io.StringIO()
+        collector.print_stats(file=output)
+        result = output.getvalue()
+        
+        assert "10.00x" in result
+        assert "1.0000s" in result
 
     def test_print_stats(self):
         """print_stats writes to specified file."""

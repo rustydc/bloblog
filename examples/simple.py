@@ -12,16 +12,19 @@ Usage:
 """
 
 import asyncio
+from logging import getLogger
 from typing import Annotated
 
 from tinman import In, Out
+
+_logger = getLogger(__name__)
 
 
 # Example 1: Simple function node
 async def producer(output: Annotated[Out[str], "messages"]):
     for i in range(1, 6):
         msg = f"Message {i}"
-        print(f"Producer: Sending '{msg}'")
+        _logger.info(f"Producer: Sending '{msg}'")
         await output.publish(msg)
         await asyncio.sleep(0.5)
 
@@ -32,6 +35,7 @@ async def uppercase(
     output: Annotated[Out[str], "uppercase"],
 ):
     async for msg in input:
+        _logger.info(f"Uppercase: Transforming '{msg}' to '{msg.upper()}'")
         await output.publish(msg.upper())
 
 
@@ -40,7 +44,7 @@ async def consumer(
     input: Annotated[In[str], "uppercase"],
 ):
     async for msg in input:
-        print(f"Consumer: Received '{msg}'")
+        _logger.info(f"Consumer: Received '{msg}'")
 
 # Pre-built pipeline for CLI usage
 pipeline = [producer, uppercase, consumer]

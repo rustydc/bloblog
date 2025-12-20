@@ -281,6 +281,9 @@ def run(
     g = Graph.of(*node_list)
     
     level = getattr(logging, log_level.upper(), logging.INFO)
+    # Set root logger level to allow log capture at the specified level
+    if capture_logs:
+        logging.getLogger().setLevel(level)
     with log_capture_context(capture_logs, channel=log_channel, level=level) as log_nodes:
         # Add log capture nodes
         g.nodes.extend(log_nodes)
@@ -380,6 +383,9 @@ def playback(
     has_logs_channel = capture_logs or has_recorded_logs
     
     level = getattr(logging, log_level.upper(), logging.INFO)
+    # Set root logger level to allow log capture at the specified level
+    if capture_logs:
+        logging.getLogger().setLevel(level)
     with log_capture_context(
         capture_logs,
         channel=log_channel,

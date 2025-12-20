@@ -21,10 +21,16 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
+
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
 from .pubsub import In
 from .runtime import NodeSpec
@@ -70,39 +76,104 @@ class StatsCollector:
     
     channels: dict[str, ChannelStats] = field(default_factory=dict)
     
-    def record(self, channel: str, time_ns: int) -> None:
-        """Record a message on a channel."""
+    # Global timestamp tracking (across all channels)
+    first_recorded_ns: int | None = None
+    last_recorded_ns: int | None = None
+    first_real_ns: int | None = None
+    last_real_ns: int | None = None
+    
+    def record(self, channel: str, time_ns: int, real_time_ns: int | None = None) -> None:
+        """Record a message on a channel.
+        
+        Args:
+            channel: The channel name.
+            time_ns: The recorded timestamp (from the log or timer).
+            real_time_ns: The real wall-clock time in nanoseconds.
+        """
         if channel not in self.channels:
             self.channels[channel] = ChannelStats(name=channel)
         self.channels[channel].record_message(time_ns)
+        
+        # Track global recorded timestamps
+        if self.first_recorded_ns is None:
+            self.first_recorded_ns = time_ns
+        self.last_recorded_ns = time_ns
+        
+        # Track global real timestamps
+        if real_time_ns is not None:
+            if self.first_real_ns is None:
+                self.first_real_ns = real_time_ns
+            self.last_real_ns = real_time_ns
     
-    def format_stats(self, include_header: bool = True) -> str:
-        """Format statistics as a table string."""
-        if not self.channels:
-            return "No channels recorded."
+    @property
+    def recorded_duration_seconds(self) -> float:
+        """Total recorded duration from first to last message in seconds."""
+        if self.first_recorded_ns is None or self.last_recorded_ns is None:
+            return 0.0
+        return (self.last_recorded_ns - self.first_recorded_ns) / 1e9
+    
+    @property
+    def real_duration_seconds(self) -> float:
+        """Total real (wall-clock) duration from first to last message in seconds."""
+        if self.first_real_ns is None or self.last_real_ns is None:
+            return 0.0
+        return (self.last_real_ns - self.first_real_ns) / 1e9
+    
+    @property
+    def speed_multiple(self) -> float | None:
+        """Speed multiple: recorded_duration / real_duration.
+        
+        Returns None if real duration is zero or not tracked.
+        A value > 1.0 means playback was faster than real-time.
+        A value < 1.0 means playback was slower than real-time.
+        """
+        real = self.real_duration_seconds
+        if real <= 0:
+            return None
+        return self.recorded_duration_seconds / real
+    
+    def _build_table(self) -> Table:
+        """Build a rich Table with channel statistics."""
+        table = Table(box=None, show_header=True, header_style="bold")
+        table.add_column("Channel", style="cyan")
+        table.add_column("Count", justify="right", style="green")
+        table.add_column("Hz", justify="right", style="yellow")
         
         # Sort channels by name
         sorted_channels = sorted(self.channels.values(), key=lambda c: c.name)
         
-        # Calculate column widths
-        name_width = max(len("Channel"), max(len(c.name) for c in sorted_channels))
-        count_width = max(len("Count"), max(len(str(c.count)) for c in sorted_channels))
-        
-        lines = []
-        if include_header:
-            header = f"{'Channel':<{name_width}}  {'Count':>{count_width}}  {'Hz':>10}"
-            lines.append(header)
-            lines.append("-" * len(header))
-        
         for stats in sorted_channels:
             hz_str = f"{stats.hz:.2f}" if stats.hz > 0 else "-"
-            lines.append(f"{stats.name:<{name_width}}  {stats.count:>{count_width}}  {hz_str:>10}")
+            table.add_row(stats.name, str(stats.count), hz_str)
         
-        return "\n".join(lines)
+        return table
     
     def print_stats(self, file: TextIO = sys.stdout) -> None:
-        """Print formatted statistics to a file."""
-        print(self.format_stats(), file=file)
+        """Print formatted statistics to a file using rich."""
+        if not self.channels:
+            print("No channels recorded.", file=file)
+            return
+        
+        # Build elapsed time text
+        real_dur = self.real_duration_seconds
+        speed = self.speed_multiple
+        elapsed_text = f"[b]Elapsed[/b]: {real_dur:.4f}s"
+        if real_dur > 0 and speed is not None:
+            elapsed_text += f" ({speed:.2f}x)"
+        
+        # Combine table and elapsed into a panel
+        content = Group(
+            Text.from_markup(elapsed_text),
+            Text(""),
+            self._build_table(),
+
+        )
+        panel = Panel(content, title="Stats", border_style="blue", expand=False)
+        
+        console = Console(file=file)
+        console.print("")
+        console.print(panel)
+
 
 
 def create_stats_node(
@@ -144,7 +215,7 @@ def create_stats_node(
         async def collect_channel(name: str, channel: In) -> None:
             """Collect stats for a single channel."""
             async for _item in channel:
-                collector.record(name, timer.time_ns())
+                collector.record(name, timer.time_ns(), time.time_ns())
         
         async def periodic_printer() -> None:
             """Print stats periodically if configured."""
@@ -169,7 +240,6 @@ def create_stats_node(
             pass
         finally:
             if print_on_complete and collector.channels:
-                print("\n--- Final Channel Stats ---", file=output)
                 collector.print_stats(file=output)
     
     return NodeSpec(
@@ -223,7 +293,7 @@ async def run_stats(
         """Collect stats for a single channel."""
         reader = ObLogReader(log_dir)
         async for timestamp, _item in reader.read_channel(channel):
-            collector.record(channel, timestamp)
+            collector.record(channel, timestamp, time.time_ns())
     
     async with asyncio.TaskGroup() as tg:
         for channel in channels:
