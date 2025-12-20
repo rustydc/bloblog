@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
@@ -229,3 +230,45 @@ async def run_stats(
             tg.create_task(collect_channel(channel))
     
     collector.print_stats(file=output)
+
+
+# =============================================================================
+# Transform function for Graph API
+# =============================================================================
+
+def with_stats(
+    print_interval: float | None = None,
+    print_on_complete: bool = True,
+    output: TextIO = sys.stderr,
+) -> "Callable":
+    """Add statistics collection to a graph.
+    
+    Args:
+        print_interval: If set, print stats every N seconds.
+        print_on_complete: If True, print final stats on completion.
+        output: File to print stats to (default: stderr).
+        
+    Returns:
+        A transform function that adds stats collection to a graph.
+        
+    Example:
+        >>> from tinman import Graph
+        >>> from tinman.stats import with_stats
+        >>> 
+        >>> graph = Graph.of(producer, consumer)
+        >>> graph = with_stats()(graph)
+        >>> await graph.run()
+    """
+    from typing import TYPE_CHECKING, Callable
+    if TYPE_CHECKING:
+        from .launcher import Graph
+    
+    def transform(g: "Graph") -> "Graph":
+        g.nodes.append(create_stats_node(
+            daemon=True,
+            print_interval=print_interval,
+            print_on_complete=print_on_complete,
+            output=output,
+        ))
+        return g
+    return transform

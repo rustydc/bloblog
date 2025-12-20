@@ -550,6 +550,68 @@ def get_current_timer() -> Timer | None:
     return _current_timer
 
 
+# =============================================================================
+# Transform function for Graph API
+# =============================================================================
+
+def with_log_capture(
+    channel: str = "logs",
+    level: int = logging.INFO,
+    logger: logging.Logger | str | None = None,
+    print_logs: bool = False,
+) -> Callable:
+    """Add Python log capture to a graph.
+    
+    Creates a LogHandler and attaches it to capture Python log records,
+    publishing them as LogEntry objects on a channel.
+    
+    Args:
+        channel: Channel name for log output. Default: "logs".
+        level: Minimum log level to capture. Default: logging.INFO.
+        logger: Logger to attach to. None = root logger, str = logger name.
+        print_logs: If True, also add a log printer node.
+        
+    Returns:
+        A transform function that adds log capture to a graph.
+        
+    Example:
+        >>> from tinman import Graph
+        >>> from tinman.logging import with_log_capture
+        >>> 
+        >>> graph = Graph.of(producer, consumer)
+        >>> graph = with_log_capture(print_logs=True)(graph)
+        >>> await graph.run()
+    """
+    from typing import TYPE_CHECKING
+    if TYPE_CHECKING:
+        from .launcher import Graph
+    
+    def transform(g) -> "Graph":
+        handler = LogHandler(channel=channel, level=level)
+        
+        # Attach to logger
+        if logger is None:
+            target_logger = logging.getLogger()
+        elif isinstance(logger, str):
+            target_logger = logging.getLogger(logger)
+        else:
+            target_logger = logger
+        target_logger.addHandler(handler)
+        
+        # Add capture node
+        g.nodes.append(handler.node)
+        
+        # Add printer node if requested
+        if print_logs:
+            g.nodes.append(create_log_printer(channel))
+        
+        # Store handler for cleanup
+        g._log_handler = handler
+        
+        return g
+    return transform
+
+
 @contextmanager
 def log_capture_context(
     enabled: bool = True,

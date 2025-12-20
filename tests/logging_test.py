@@ -6,7 +6,8 @@ from typing import Annotated
 
 import pytest
 
-from tinman import In, Out, run, VirtualClock, FastForwardTimer
+from tinman import In, Out, VirtualClock, FastForwardTimer
+from tinman.runtime import run_nodes
 from tinman.logging import (
     LogEntry,
     LogEntryCodec,
@@ -306,7 +307,7 @@ class TestLogCaptureNode:
                 captured.append(entry)
         
         try:
-            await run([producer, handler.node, log_consumer])
+            await run_nodes([producer, handler.node, log_consumer])
             
             assert len(captured) == 3
             assert captured[0].message == "Producing message 0"

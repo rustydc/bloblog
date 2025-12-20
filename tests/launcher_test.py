@@ -7,8 +7,10 @@ from typing import Annotated
 import pytest
 from .test_utils import StringCodec, make_consumer_node, make_producer_node, make_transform_node
 
-from tinman import In, Out, ObLogReader, get_node_specs, run
-from tinman.launcher import create_logging_node, create_playback_graph
+from tinman import In, Out, ObLogReader, get_node_specs
+from tinman.runtime import run_nodes
+from tinman.recording import create_recording_node
+from tinman.playback import create_playback_graph
 
 
 class TestRun:
@@ -19,7 +21,7 @@ class TestRun:
         producer = make_producer_node("producer", messages)
         consumer, received = make_consumer_node("producer_output", len(messages))
 
-        await run([producer, consumer])
+        await run_nodes([producer, consumer])
 
         assert received == messages
 
@@ -31,7 +33,7 @@ class TestRun:
         consumer1, received1 = make_consumer_node("producer_output", len(messages))
         consumer2, received2 = make_consumer_node("producer_output", len(messages))
 
-        await run([producer, consumer1, consumer2])
+        await run_nodes([producer, consumer1, consumer2])
 
         assert received1 == messages
         assert received2 == messages
@@ -49,7 +51,7 @@ class TestRun:
         )
         consumer, received = make_consumer_node("transformer_output", len(messages))
 
-        await run([producer, transformer, consumer])
+        await run_nodes([producer, transformer, consumer])
 
         assert received == ["HELLO", "WORLD"]
 
@@ -62,7 +64,7 @@ class TestRun:
 
         # Should complete without hanging
         async with asyncio.timeout(1.0):
-            await run([producer, consumer])
+            await run_nodes([producer, consumer])
 
         assert received == messages
 
@@ -74,7 +76,7 @@ class TestRun:
 
         # Should complete without error
         async with asyncio.timeout(1.0):
-            await run([producer])
+            await run_nodes([producer])
 
     @pytest.mark.asyncio
     async def test_validation_error_propagates(self):
@@ -82,7 +84,7 @@ class TestRun:
         consumer, _ = make_consumer_node("nonexistent_channel", 1)
 
         with pytest.raises(ValueError, match="has no producer node"):
-            await run([consumer])
+            await run_nodes([consumer])
 
     @pytest.mark.asyncio
     async def test_dict_channel_injection(self):
@@ -108,7 +110,7 @@ class TestRun:
                 for channel_name, input_channel in channels.items():
                     tg.create_task(collect_from_channel(channel_name, input_channel))
         
-        await run([producer_a, producer_b, monitor_all])
+        await run_nodes([producer_a, producer_b, monitor_all])
 
         # make_producer_node creates channels named "{name}_output"
         assert received_dict["channel_a_output"] == messages_a
@@ -117,14 +119,14 @@ class TestRun:
 
 class TestLoggingNode:
     @pytest.mark.asyncio
-    async def test_create_logging_node(self, tmp_path):
-        """Test that create_logging_node creates a working logging node."""
+    async def test_create_recording_node(self, tmp_path):
+        """Test that create_recording_node creates a working logging node."""
         messages = ["log1", "log2", "log3"]
         producer = make_producer_node("test", messages)
         
         # Create and run with logging node - codecs extracted automatically
-        logger = create_logging_node(tmp_path, [producer])
-        await run([producer, logger])
+        logger = create_recording_node(tmp_path, [producer])
+        await run_nodes([producer, logger])
         
         # Verify log file was created
         log_file = tmp_path / "test_output.blog"
@@ -148,8 +150,8 @@ class TestLoggingNode:
         producer_b = make_producer_node("channel_b", messages_b)
         
         # Create logger that only logs channel_a
-        logger = create_logging_node(tmp_path, [producer_a, producer_b], channel_filter={"channel_a_output"})
-        await run([producer_a, producer_b, logger])
+        logger = create_recording_node(tmp_path, [producer_a, producer_b], channel_filter={"channel_a_output"})
+        await run_nodes([producer_a, producer_b, logger])
         
         # Verify only channel_a was logged
         assert (tmp_path / "channel_a_output.blog").exists()
@@ -170,8 +172,8 @@ class TestPlayback:
                 await output.publish(msg)
 
         # Use explicit logging node
-        logger = create_logging_node(tmp_path, [recording_producer])
-        await run([recording_producer, logger])
+        logger = create_recording_node(tmp_path, [recording_producer])
+        await run_nodes([recording_producer, logger])
 
         # Verify log file was created
         log_file = tmp_path / "producer_output.blog"
@@ -188,7 +190,7 @@ class TestPlayback:
 
         # Use explicit playback graph
         graph, _ = await create_playback_graph([live_consumer], tmp_path)
-        await run(graph)
+        await run_nodes(graph)
 
         assert received == messages
 
@@ -212,8 +214,8 @@ class TestPlaybackNode:
         producer = make_producer_node("test", messages)
         
         # Log data
-        logger = create_logging_node(tmp_path, [producer])
-        await run([producer, logger])
+        logger = create_recording_node(tmp_path, [producer])
+        await run_nodes([producer, logger])
         
         # Now read the codec back (no context manager needed for reader)
         reader = ObLogReader(tmp_path)
@@ -229,8 +231,8 @@ class TestPlaybackNode:
         messages = ["play1", "play2", "play3"]
         producer = make_producer_node("recorded", messages)
         
-        logger = create_logging_node(tmp_path, [producer])
-        await run([producer, logger])
+        logger = create_recording_node(tmp_path, [producer])
+        await run_nodes([producer, logger])
         
         # Now create a consumer that expects "recorded_output" channel
         received = []
@@ -248,7 +250,7 @@ class TestPlaybackNode:
         assert first_ts is not None
         
         # Run and verify
-        await run(graph)
+        await run_nodes(graph)
         assert received == messages
     
     @pytest.mark.asyncio
@@ -258,8 +260,8 @@ class TestPlaybackNode:
         messages = ["msg1", "msg2"]
         producer = make_producer_node("timed", messages)
         
-        logger = create_logging_node(tmp_path, [producer])
-        await run([producer, logger])
+        logger = create_recording_node(tmp_path, [producer])
+        await run_nodes([producer, logger])
         
         # Play back at 2x speed - should be roughly twice as fast
         received = []
@@ -273,7 +275,7 @@ class TestPlaybackNode:
         graph, _ = await create_playback_graph([consumer], tmp_path, speed=2.0)
         
         start = time.time()
-        await run(graph)
+        await run_nodes(graph)
         duration = time.time() - start
         
         assert received == messages
@@ -292,14 +294,15 @@ class TestPlaybackNode:
 
 class TestConvenienceFunctions:
     @pytest.mark.asyncio
-    async def test_run_with_log_dir(self, tmp_path):
-        """Test that run() with log_dir automatically creates logging node."""
+    async def test_run_with_recording(self, tmp_path):
+        """Test that create_recording_node properly logs data."""
         messages = ["log1", "log2", "log3"]
         producer = make_producer_node("test", messages)
         consumer, received = make_consumer_node("test_output", len(messages))
         
-        # Run with automatic logging
-        await run([producer, consumer], log_dir=tmp_path)
+        # Run with recording node
+        recorder = create_recording_node(tmp_path, [producer, consumer])
+        await run_nodes([producer, consumer, recorder])
         
         assert received == messages
         
@@ -316,37 +319,42 @@ class TestConvenienceFunctions:
         assert logged == messages
     
     @pytest.mark.asyncio
-    async def test_playback_convenience(self, tmp_path):
-        """Test that playback() convenience function works."""
-        from tinman import playback
+    async def test_playback_from_recorded(self, tmp_path):
+        """Test playback using create_playback_graph."""
+        from tinman.timer import VirtualClock, FastForwardTimer
         
         # First, record some data
         messages = ["play1", "play2", "play3"]
         producer = make_producer_node("recorded", messages)
+        recorder = create_recording_node(tmp_path, [producer])
+        await run_nodes([producer, recorder])
         
-        await run([producer], log_dir=tmp_path)
-        
-        # Now use playback() convenience function
+        # Now playback
         received = []
         
         async def consumer(inp: Annotated[In[str], "recorded_output"]) -> None:
             async for msg in inp:
                 received.append(msg)
         
-        await playback([consumer], tmp_path)
+        clock = VirtualClock()
+        graph, first_ts = await create_playback_graph([consumer], tmp_path, speed=float('inf'), clock=clock)
+        timer = FastForwardTimer(clock)
+        if first_ts:
+            clock._time = first_ts
+        await run_nodes(graph, timer=timer)
         
         assert received == messages
     
     @pytest.mark.asyncio
     async def test_playback_with_speed(self, tmp_path):
-        """Test that playback() respects speed parameter."""
-        from tinman import playback
+        """Test that playback respects speed parameter."""
+        from tinman.timer import ScaledTimer
 
         # Record data
         messages = ["msg1", "msg2"]
         producer = make_producer_node("timed", messages)
-
-        await run([producer], log_dir=tmp_path)
+        recorder = create_recording_node(tmp_path, [producer])
+        await run_nodes([producer, recorder])
 
         # Playback at 2x speed
         received = []
@@ -355,8 +363,11 @@ class TestConvenienceFunctions:
             async for msg in inp:
                 received.append(msg)
 
+        graph, first_ts = await create_playback_graph([consumer], tmp_path, speed=2.0)
+        timer = ScaledTimer(2.0, start_time=first_ts)
+        
         start = time.time()
-        await playback([consumer], tmp_path, speed=2.0)
+        await run_nodes(graph, timer=timer)
         duration = time.time() - start
 
         assert received == messages
@@ -366,12 +377,13 @@ class TestConvenienceFunctions:
     @pytest.mark.asyncio
     async def test_playback_fast_forward_with_timer(self, tmp_path):
         """Test fast-forward playback with Timer coordination."""
-        from tinman import playback, Timer
+        from tinman.timer import Timer, VirtualClock, FastForwardTimer
 
         # Record data
         messages = ["msg1", "msg2", "msg3"]
         producer = make_producer_node("data", messages)
-        await run([producer], log_dir=tmp_path)
+        recorder = create_recording_node(tmp_path, [producer])
+        await run_nodes([producer, recorder])
 
         # Playback with a node that uses Timer
         events: list[str] = []
@@ -383,8 +395,13 @@ class TestConvenienceFunctions:
             async for msg in inp:
                 events.append(f"msg:{msg}@{timer.time_ns()}")
 
-        # Fast-forward playback (default speed=inf)
-        await playback([timed_consumer], tmp_path)
+        # Fast-forward playback
+        clock = VirtualClock()
+        graph, first_ts = await create_playback_graph([timed_consumer], tmp_path, speed=float('inf'), clock=clock)
+        timer = FastForwardTimer(clock)
+        if first_ts:
+            clock._time = first_ts
+        await run_nodes(graph, timer=timer)
 
         assert len(events) == 3
         # All messages should be received
@@ -393,12 +410,13 @@ class TestConvenienceFunctions:
     @pytest.mark.asyncio
     async def test_playback_fast_forward_timer_sleep(self, tmp_path):
         """Test that Timer.sleep() works correctly during fast-forward playback."""
-        from tinman import playback, Timer
+        from tinman.timer import Timer, VirtualClock, FastForwardTimer
 
         # Record data - just ONE message to simplify
         messages = ["a"]
         producer = make_producer_node("input", messages)
-        await run([producer], log_dir=tmp_path)
+        recorder = create_recording_node(tmp_path, [producer])
+        await run_nodes([producer, recorder])
 
         # Consumer that sleeps after processing
         processed: list[str] = []
@@ -416,8 +434,14 @@ class TestConvenienceFunctions:
                 sleep_completed = True
 
         # Fast-forward should complete quickly despite sleep calls
+        clock = VirtualClock()
+        graph, first_ts = await create_playback_graph([sleeping_consumer], tmp_path, speed=float('inf'), clock=clock)
+        timer = FastForwardTimer(clock)
+        if first_ts:
+            clock._time = first_ts
+        
         start = time.time()
-        await playback([sleeping_consumer], tmp_path)
+        await run_nodes(graph, timer=timer)
         duration = time.time() - start
 
         assert processed == messages
@@ -428,12 +452,11 @@ class TestConvenienceFunctions:
     @pytest.mark.asyncio
     async def test_create_playback_graph_requires_clock_for_inf(self, tmp_path):
         """Test that create_playback_graph raises if speed=inf without clock."""
-        from tinman.launcher import create_playback_graph
-
         # Record some data first
         messages = ["test"]
         producer = make_producer_node("data", messages)
-        await run([producer], log_dir=tmp_path)
+        recorder = create_recording_node(tmp_path, [producer])
+        await run_nodes([producer, recorder])
 
         # Try to create playback graph with speed=inf but no clock
         async def consumer(inp: Annotated[In[str], "data_output"]) -> None:

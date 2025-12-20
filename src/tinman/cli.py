@@ -19,9 +19,10 @@ from typing import Annotated
 
 import cyclopts
 
-from .launcher import playback as _playback
-from .launcher import run as _run
-from .runtime import NodeSpec, get_node_specs
+from .launcher import Graph
+from .playback import with_playback
+from .recording import create_recording_node
+from .runtime import NodeSpec, run_nodes
 from .oblog import enable_pickle_codec
 from .logging import log_capture_context, create_log_printer
 from .stats import create_stats_node
@@ -174,6 +175,7 @@ def run(
     log_level: str = "INFO",
     log_channel: str = "logs",
     stats: bool = False,
+    graph: Path | None = None,
 ) -> None:
     """Run a node graph.
 
@@ -196,6 +198,8 @@ def run(
         Channel name for captured logs. Default: "logs".
     stats
         Print channel statistics (message counts and Hz) on exit.
+    graph
+        Output a Graphviz DOT file of the node graph and exit without running.
 
     Examples
     --------
@@ -204,19 +208,37 @@ def run(
     $ tinman run myapp:nodes --log-dir logs/ --capture-logs
     $ tinman run myapp:nodes --log-dir logs/ --capture-logs --log-level DEBUG
     $ tinman run myapp:nodes --stats
+    $ tinman run myapp:nodes --graph graph.dot
     """
     if pickle:
         enable_pickle_codec()
     node_list = load_nodes(nodes)
     
-    # Add stats node if requested
-    stats_nodes = [create_stats_node(daemon=True)] if stats else []
+    # Build graph from user nodes
+    g = Graph.of(*node_list)
     
     level = getattr(logging, log_level.upper(), logging.INFO)
     with log_capture_context(capture_logs, channel=log_channel, level=level) as log_nodes:
+        # Add log capture nodes
+        g.nodes.extend(log_nodes)
+        
         # Add log printer if we're capturing logs
-        printer_nodes = [create_log_printer(log_channel)] if capture_logs else []
-        asyncio.run(_run([*node_list, *log_nodes, *printer_nodes, *stats_nodes], log_dir=log_dir))  # type: ignore[arg-type]
+        if capture_logs:
+            g.nodes.append(create_log_printer(log_channel))
+        
+        # Add stats if requested
+        if stats:
+            g.nodes.append(create_stats_node(daemon=True))
+        
+        # Add recording if log_dir specified
+        if log_dir is not None:
+            g.nodes.append(create_recording_node(log_dir, g.nodes))
+        
+        # If --graph specified, output DOT
+        if graph is not None:
+            graph.write_text(g.to_dot())
+        
+        asyncio.run(g.run())
 
 
 @app.command
@@ -232,6 +254,7 @@ def playback(
     log_channel: str = "logs",
     use_virtual_time: bool = True,
     stats: bool = False,
+    graph: Path | None = None,
 ) -> None:
     """Play back recorded logs through nodes.
 
@@ -263,6 +286,8 @@ def playback(
         than wall clock time. Default: True.
     stats
         Print channel statistics (message counts and Hz) on exit.
+    graph
+        Output a Graphviz DOT file of the node graph and exit without running.
 
     Examples
     --------
@@ -271,13 +296,14 @@ def playback(
     $ tinman playback myapp:transform --from logs/ --log-dir processed/
     $ tinman playback myapp:consumer --from logs/ --capture-logs
     $ tinman playback myapp:consumer --from logs/ --stats
+    $ tinman playback myapp:consumer --from logs/ --graph graph.dot
     """
     if pickle:
         enable_pickle_codec()
     node_list = load_nodes(nodes)
     
-    # Add stats node if requested
-    stats_nodes = [create_stats_node(daemon=True)] if stats else []
+    # Build graph from user nodes
+    g = Graph.of(*node_list)
     
     # Check if logs channel will exist (from capture or recorded)
     has_recorded_logs = (from_ / f"{log_channel}.blog").exists()
@@ -288,17 +314,32 @@ def playback(
         capture_logs,
         channel=log_channel,
         level=level,
-        use_virtual_time=False,  # Timer factory is installed by _playback instead
+        use_virtual_time=False,  # Timer factory is installed by with_playback
     ) as log_nodes:
+        # Add log capture nodes
+        g.nodes.extend(log_nodes)
+        
         # Add log printer if logs channel exists
-        printer_nodes = [create_log_printer(log_channel)] if has_logs_channel else []
-        asyncio.run(_playback(
-            [*node_list, *log_nodes, *printer_nodes, *stats_nodes],
-            playback_dir=from_,
-            speed=speed,
-            log_dir=log_dir,
-            use_virtual_time_logs=use_virtual_time,
-        ))  # type: ignore[arg-type]
+        if has_logs_channel:
+            g.nodes.append(create_log_printer(log_channel))
+        
+        # Add stats if requested
+        if stats:
+            g.nodes.append(create_stats_node(daemon=True))
+        
+        # Add recording if log_dir specified
+        if log_dir is not None:
+            g.nodes.append(create_recording_node(log_dir, g.nodes))
+        
+        # Apply playback transform
+        g = with_playback(from_, speed=speed, use_virtual_time_logs=use_virtual_time)(g)
+        
+        # If --graph specified, output DOT
+        if graph is not None:
+            graph.write_text(g.to_dot())
+        
+        # Run
+        asyncio.run(g.run())
 
 
 @app.command
@@ -393,7 +434,6 @@ def logs(
                     console.print(Text(entry.exc_text, style="red"))
         else:
             # For timed playback, use the full playback infrastructure
-            from .launcher import playback
             from .pubsub import In
             from .runtime import NodeSpec
             
@@ -445,12 +485,12 @@ def logs(
                 outputs={},
                 daemon=True,
             )
-            await playback(
-                [printer_spec], 
-                from_, 
-                speed=speed, 
-                use_virtual_time_logs=False,  # We're reading recorded logs, not capturing new ones
-            )
+            
+            # Use Graph API with playback transform
+            g = Graph.of(printer_spec)
+            g = with_playback(from_, speed=speed)(g)
+            asyncio.run(g.run())
+            return
     
     asyncio.run(_logs())
 
