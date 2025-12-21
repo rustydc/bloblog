@@ -462,121 +462,17 @@ def logs(
             print("Error: No log directory specified and no logs found in ~/.tinman/logs/", file=sys.stderr)
             sys.exit(1)
     
-    from .logging import LogEntry, create_log_printer
-    from .oblog import ObLogReader
+    log_file = from_ / f"{channel}.blog"
+    if not log_file.exists():
+        print(f"No log file found: {log_file}", file=sys.stderr)
+        sys.exit(1)
     
     min_level = getattr(logging, level.upper(), logging.DEBUG)
     
-    async def _logs() -> None:
-        log_file = from_ / f"{channel}.blog"
-        if not log_file.exists():
-            print(f"No log file found: {log_file}", file=sys.stderr)
-            sys.exit(1)
-        
-        # For instant playback, just read and print directly
-        if speed == float('inf'):
-            reader = ObLogReader(from_)
-            from datetime import datetime
-            from rich.console import Console
-            from rich.text import Text
-            import logging as log_module
-            
-            LEVEL_STYLES = {
-                log_module.DEBUG: "dim",
-                log_module.INFO: "green",
-                log_module.WARNING: "yellow",
-                log_module.ERROR: "red",
-                log_module.CRITICAL: "red bold",
-            }
-            console = Console()
-            
-            async for _ts, entry in reader.read_channel(channel):
-                entry: LogEntry  # type: ignore[no-redef]
-                # Apply filters
-                if node is not None and entry.node_name != node:
-                    continue
-                if entry.level < min_level:
-                    continue
-                    
-                level_name = log_module.getLevelName(entry.level)
-                style = LEVEL_STYLES.get(entry.level, "white")
-                timestamp = datetime.fromtimestamp(entry.timestamp_ns / 1_000_000_000)
-                time_str = timestamp.strftime("%H:%M:%S.%f")
-                
-                text = Text()
-                text.append(time_str, style="dim")
-                text.append(" ")
-                text.append(f"[{level_name:8}]", style=style)
-                if entry.node_name:
-                    text.append(f"[{entry.node_name}] ", style="cyan")
-                else:
-                    text.append(" ")
-                text.append(f"{entry.name}: {entry.message}")
-                console.print(text)
-                
-                if entry.exc_text:
-                    console.print(Text(entry.exc_text, style="red"))
-        else:
-            # For timed playback, use the full playback infrastructure
-            from .pubsub import In
-            from .runtime import NodeSpec
-            
-            # Create a filtered log printer
-            from datetime import datetime
-            from rich.console import Console
-            from rich.text import Text
-            import logging as log_module
-            
-            LEVEL_STYLES = {
-                log_module.DEBUG: "dim",
-                log_module.INFO: "green",
-                log_module.WARNING: "yellow",
-                log_module.ERROR: "red",
-                log_module.CRITICAL: "red bold",
-            }
-            console = Console()
-            
-            async def filtered_log_printer(logs_in: In[LogEntry]) -> None:
-                async for entry in logs_in:
-                    # Apply filters
-                    if node is not None and entry.node_name != node:
-                        continue
-                    if entry.level < min_level:
-                        continue
-                    
-                    level_name = log_module.getLevelName(entry.level)
-                    style = LEVEL_STYLES.get(entry.level, "white")
-                    timestamp = datetime.fromtimestamp(entry.timestamp_ns / 1_000_000_000)
-                    time_str = timestamp.strftime("%H:%M:%S.%f")
-                    
-                    text = Text()
-                    text.append(time_str, style="dim")
-                    text.append(" ")
-                    text.append(f"[{level_name:8}]", style=style)
-                    if entry.node_name:
-                        text.append(f"[{entry.node_name}] ", style="cyan")
-                    else:
-                        text.append(" ")
-                    text.append(f"{entry.name}: {entry.message}")
-                    console.print(text)
-                    
-                    if entry.exc_text:
-                        console.print(Text(entry.exc_text, style="red"))
-            
-            printer_spec = NodeSpec(
-                node_fn=filtered_log_printer,
-                inputs={"logs_in": (channel, 100)},
-                outputs={},
-                daemon=True,
-            )
-            
-            # Use Graph API with playback transform
-            g = Graph.of(printer_spec)
-            g = with_playback(from_, speed=speed)(g)
-            asyncio.run(g.run())
-            return
-    
-    asyncio.run(_logs())
+    # Use playback with a filtered log printer
+    g = Graph.of(create_log_printer(channel, node_filter=node, min_level=min_level))
+    g = with_playback(from_, speed=speed)(g)
+    asyncio.run(g.run())
 
 
 @app.command

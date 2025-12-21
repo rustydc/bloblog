@@ -41,6 +41,10 @@ from .pubsub import Out
 from .runtime import NodeSpec, get_current_node_name
 from .timer import Timer
 
+if TYPE_CHECKING:
+    from rich.console import Console
+    from rich.text import Text
+
 
 @dataclass
 class LogEntry:
@@ -656,11 +660,97 @@ def log_capture_context(
         logging.getLogger().removeHandler(handler)
 
 
-def create_log_printer(channel: str = "logs") -> NodeSpec:
+def _node_color(name: str) -> str:
+    """Generate a consistent color for a node name using golden ratio hue spacing.
+    
+    Uses HSL with fixed saturation/lightness and hue based on hash of name.
+    The golden ratio provides good visual separation between adjacent hashes.
+    """
+    import colorsys
+    import hashlib
+    # Use md5 for consistent cross-platform hash, take first 4 bytes as int
+    h_bytes = hashlib.md5(name.encode()).digest()[:4]
+    h_int = int.from_bytes(h_bytes, 'little')
+    # Golden ratio conjugate for good hue distribution
+    phi = 0.618033988749895
+    hue = (h_int * phi) % 1.0
+    # HLS: hue, lightness, saturation - medium lightness for visibility
+    r, g, b = colorsys.hls_to_rgb(hue, 0.55, 0.75)
+    return f"rgb({int(r*255)},{int(g*255)},{int(b*255)})"
+
+
+# Single-letter level indicators with colors
+LEVEL_CHARS = {
+    logging.DEBUG: ("D", "dim"),
+    logging.INFO: ("I", "green"),
+    logging.WARNING: ("W", "yellow"),
+    logging.ERROR: ("E", "red"),
+    logging.CRITICAL: ("C", "red bold"),
+}
+
+
+def format_log_entry(
+    entry: LogEntry,
+    console: "Console",
+    *,
+    node_filter: str | None = None,
+    min_level: int = logging.DEBUG,
+) -> "Text | None":
+    """Format a log entry as Rich Text for console output.
+    
+    Args:
+        entry: The log entry to format.
+        console: Rich Console instance (unused but kept for consistency).
+        node_filter: If set, only show logs from this node name.
+        min_level: Minimum log level to show.
+        
+    Returns:
+        Rich Text object, or None if filtered out.
+    """
+    from datetime import datetime
+    from rich.text import Text
+    
+    # Apply filters
+    if node_filter is not None and entry.node_name != node_filter:
+        return None
+    if entry.level < min_level:
+        return None
+    
+    level_char, level_style = LEVEL_CHARS.get(entry.level, ("?", "white"))
+    timestamp = datetime.fromtimestamp(entry.timestamp_ns / 1_000_000_000)
+    time_str = timestamp.strftime("%H:%M:%S.%f")[:-3]  # Trim to milliseconds
+    
+    text = Text()
+    #text.append("[", style="blue")
+    text.append(time_str)
+    text.append("·", style="blue")
+    text.append(level_char, style=level_style)
+    text.append("·", style="blue")
+    if entry.node_name:
+        node_style = _node_color(entry.node_name)
+        text.append(f"{entry.node_name}", style=node_style)
+    text.append("❳ ", style="blue")
+    text.append(entry.message)
+    
+    if entry.exc_text:
+        text.append("\n")
+        text.append(entry.exc_text, style="red")
+    
+    return text
+
+
+def create_log_printer(
+    channel: str = "logs",
+    *,
+    node_filter: str | None = None,
+    min_level: int = logging.DEBUG,
+) -> NodeSpec:
     """Create a daemon node that prints log entries from a channel.
     
     Args:
         channel: Channel name to subscribe to. Default: "logs".
+        node_filter: If set, only show logs from this node name.
+        min_level: Minimum log level to show. Default: DEBUG (show all).
         
     Returns:
         A NodeSpec (daemon) that prints log entries with colored severity.
@@ -670,44 +760,17 @@ def create_log_printer(channel: str = "logs") -> NodeSpec:
         >>> nodes = [producer, consumer, log_handler.node, create_log_printer()]
         >>> await run(nodes)
     """
-    from datetime import datetime
     from .pubsub import In
     from rich.console import Console
-    from rich.text import Text
-    
-    # Color mapping for log levels
-    LEVEL_STYLES = {
-        logging.DEBUG: "dim",
-        logging.INFO: "green",
-        logging.WARNING: "yellow",
-        logging.ERROR: "red",
-        logging.CRITICAL: "red bold",
-    }
     
     console = Console()
     
     async def log_printer_node(logs: In[LogEntry]) -> None:
         """Print log entries as they arrive."""
         async for entry in logs:
-            level_name = logging.getLevelName(entry.level)
-            style = LEVEL_STYLES.get(entry.level, "white")
-            # Convert timestamp_ns to datetime
-            timestamp = datetime.fromtimestamp(entry.timestamp_ns / 1_000_000_000)
-            time_str = timestamp.strftime("%H:%M:%S.%f")
-            
-            text = Text()
-            text.append(time_str, style="dim")
-            text.append(" ")
-            text.append(f"[{level_name:8}]", style=style)
-            if entry.node_name:
-                text.append(f"[{entry.node_name}] ", style="cyan")
-            else:
-                text.append(" ")
-            text.append(f"{entry.name}: {entry.message}")
-            console.print(text)
-            
-            if entry.exc_text:
-                console.print(Text(entry.exc_text, style="red"))
+            text = format_log_entry(entry, console, node_filter=node_filter, min_level=min_level)
+            if text:
+                console.print(text)
     
     return NodeSpec(
         node_fn=log_printer_node,
