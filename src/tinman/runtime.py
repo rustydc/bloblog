@@ -29,11 +29,14 @@ import signal
 from collections.abc import Awaitable, Callable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Annotated, Any, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Annotated, Any, get_args, get_origin, get_type_hints
 
 from .oblog import Codec, PickleCodec
 from .pubsub import In, Out
 from .timer import Timer, ScaledTimer
+
+if TYPE_CHECKING:
+    from .timer import VirtualClock
 
 
 # ContextVar for tracking the currently executing node's name
@@ -129,10 +132,10 @@ class _ChannelRuntime[T]:
     The runtime creates these and manages their lifecycle.
     """
 
-    def __init__(self, name: str, codec: Codec[T]) -> None:
+    def __init__(self, name: str, codec: Codec[T], clock: "VirtualClock | None" = None) -> None:
         self.name = name
         self.codec = codec
-        self.out = Out[T]()
+        self.out = Out[T](clock=clock)
 
 
 def _parse_node_signature(
@@ -348,20 +351,28 @@ def _assign_unique_names(specs: list[NodeSpec]) -> None:
             spec.name = f"{base_name}_{seen + 1}"
 
 
-def validate_nodes(nodes: Sequence[Callable | NodeSpec]) -> None:
+def validate_nodes(
+    nodes: Sequence[Callable | NodeSpec],
+    playback_channels: set[str] | None = None,
+) -> None:
     """Validate that node inputs/outputs form a valid graph.
 
     This checks:
     1. No duplicate output channels (each channel has exactly one producer)
     2. All input channels have a corresponding producer (no dangling inputs)
     3. Nodes with dict[str, In] injection are skipped from input validation
+    4. Playback channels are considered as having producers
 
     Args:
         nodes: List of node callables or NodeSpec objects to validate.
+        playback_channels: Set of channel names provided by playback (skip validation).
 
     Raises:
         ValueError: If the graph is invalid with details about the problem.
     """
+    if playback_channels is None:
+        playback_channels = set()
+    
     # Convert all nodes to NodeSpec for uniform handling
     specs: list[NodeSpec] = []
     for node in nodes:
@@ -385,14 +396,14 @@ def validate_nodes(nodes: Sequence[Callable | NodeSpec]) -> None:
                 )
             output_channels[channel_name] = node_name
 
-    # Check all inputs have corresponding outputs
+    # Check all inputs have corresponding outputs (or are playback channels)
     for spec in specs:
         node_name = spec.node_fn.__name__
         # Skip validation if this node accepts all channels (like a logging node)
         if spec.all_channels_param:
             continue
         for _param_name, (channel_name, _queue_size) in spec.inputs.items():
-            if channel_name not in output_channels:
+            if channel_name not in output_channels and channel_name not in playback_channels:
                 raise ValueError(
                     f"Input channel '{channel_name}' in {node_name}() has no producer node. "
                     f"Use create_playback_graph() to add playback nodes for recorded data."
@@ -404,6 +415,8 @@ async def run_nodes(
     timer: Timer | None = None,
     shutdown_timeout: float = DEFAULT_SHUTDOWN_TIMEOUT,
     install_signal_handlers: bool = True,
+    playback_channels: dict | None = None,
+    clock: "VirtualClock | None" = None,
 ) -> None:
     """Run a graph of nodes, wiring their channels and executing them concurrently.
 
@@ -432,6 +445,10 @@ async def run_nodes(
         install_signal_handlers: If True, install SIGINT/SIGTERM handlers for graceful
                shutdown. Set to False when running in contexts that manage their own
                signals (e.g., pytest, nested event loops). Default is True.
+        playback_channels: Dict mapping channel_name -> (codec, list of PlaybackIn).
+               Used for playback mode to inject PlaybackIn instead of regular In.
+        clock: VirtualClock for fast-forward mode. When provided, a clock driver
+               task will process events from the clock's priority queue.
 
     Raises:
         TypeError: If nodes are not async callables.
@@ -453,6 +470,10 @@ async def run_nodes(
     # Create default timer if not provided
     if timer is None:
         timer = ScaledTimer()
+    
+    # Default empty playback channels
+    if playback_channels is None:
+        playback_channels = {}
 
     # Validate all are async callables (or NodeSpec objects)
     for node in nodes:
@@ -472,8 +493,9 @@ async def run_nodes(
     # Parse all node signatures to find inputs and outputs
     specs = get_node_specs(nodes)
     
-    # Validate the graph structure
-    validate_nodes(specs)
+    # Validate the graph structure (playback channels are considered as having producers)
+    playback_channel_names = set(playback_channels.keys()) if playback_channels else set()
+    validate_nodes(specs, playback_channels=playback_channel_names)
     
     # Build node info dictionary
     # (name, inputs, outputs, all_channels_param, timer_param, kwargs)
@@ -490,24 +512,46 @@ async def run_nodes(
         # Create runtime channels for node outputs
         for _param_name, (channel_name, codec) in spec.outputs.items():
             if channel_name not in runtime_channels:
-                runtime_channels[channel_name] = _ChannelRuntime(channel_name, codec)
+                runtime_channels[channel_name] = _ChannelRuntime(channel_name, codec, clock=clock)
+
+    # Track PlaybackIn iterator indices for each channel (for multiple subscribers)
+    playback_indices: dict[str, int] = {}
 
     # Pre-build kwargs for all nodes to avoid race conditions
     # All subscriptions must be created BEFORE any node starts running
     for _node_fn, (_name, inputs, outputs, all_channels_param, timer_param, kwargs) in node_info.items():
         for param_name, (channel_name, queue_size) in inputs.items():
-            # Get the Out from runtime channels
-            out = runtime_channels[channel_name].out
-            kwargs[param_name] = out.sub(maxsize=queue_size)
+            # Check if this is a playback channel
+            if channel_name in playback_channels:
+                # Use PlaybackIn instead of creating subscription
+                _codec, playback_ins = playback_channels[channel_name]
+                idx = playback_indices.get(channel_name, 0)
+                playback_indices[channel_name] = idx + 1
+                kwargs[param_name] = playback_ins[idx]
+            else:
+                # Regular subscription from runtime channel
+                out = runtime_channels[channel_name].out
+                sub = out.sub(maxsize=queue_size)
+                kwargs[param_name] = sub
 
         for param_name, (channel_name, _) in outputs.items():
-            kwargs[param_name] = runtime_channels[channel_name].out
+            out = runtime_channels[channel_name].out
+            kwargs[param_name] = out
 
         # Handle dict[str, In] injection for logging/monitoring nodes
         if all_channels_param:
             all_channels_dict = {}
+            # Include runtime channels (regular outputs)
             for channel_name, runtime in runtime_channels.items():
-                all_channels_dict[channel_name] = runtime.out.sub(maxsize=10)
+                sub = runtime.out.sub(maxsize=10)
+                all_channels_dict[channel_name] = sub
+            # Include playback channels
+            for channel_name, (_codec, playback_ins) in playback_channels.items():
+                # Create an additional PlaybackIn for the all-channels subscriber
+                # This requires creating a new reader, which we can't do here easily
+                # For now, skip playback channels in all_channels_dict
+                # TODO: Support playback channels in all_channels injection
+                pass
             kwargs[all_channels_param] = all_channels_dict
 
         # Handle Timer injection

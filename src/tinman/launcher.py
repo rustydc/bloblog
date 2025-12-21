@@ -35,6 +35,7 @@ from .timer import Timer
 
 if TYPE_CHECKING:
     from .logging import LogHandler
+    from .timer import VirtualClock
 
 
 @dataclass
@@ -50,11 +51,15 @@ class Graph:
         user_node_names: Names of user-provided nodes.
         timer: Timer for playback modes (None for live execution).
         _log_handler: Internal handler for log capture cleanup.
+        _playback_channels: PlaybackIn channels for playback mode.
+        _clock: VirtualClock for fast-forward playback.
     """
     nodes: list[Callable[..., Awaitable[None]] | NodeSpec]
     user_node_names: set[str]
     timer: Timer | None = None
     _log_handler: "LogHandler | None" = field(default=None, repr=False)
+    _playback_channels: dict = field(default_factory=dict, repr=False)
+    _clock: "VirtualClock | None" = field(default=None, repr=False)
     
     @classmethod
     def of(cls, *nodes: Callable[..., Awaitable[None]] | NodeSpec) -> Graph:
@@ -109,13 +114,21 @@ class Graph:
         Runs all nodes concurrently until completion. If a timer was
         set (e.g., by with_playback), it's passed to the runtime.
         
+        For fast-forward playback, a clock driver task processes events
+        from the VirtualClock's priority queue.
+        
         Any attached log handlers are cleaned up after execution.
         
         Example:
             >>> await graph.run()
         """
         try:
-            await run_nodes(self.nodes, timer=self.timer)
+            await run_nodes(
+                self.nodes, 
+                timer=self.timer,
+                playback_channels=self._playback_channels,
+                clock=self._clock,
+            )
         finally:
             # Clean up log handler if attached
             if self._log_handler is not None:

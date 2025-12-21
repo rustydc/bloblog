@@ -10,8 +10,8 @@ Three execution modes are supported:
 Key components:
 - Timer: Protocol that nodes use to access time
 - ScaledTimer: Wall clock with optional speed scaling
-- FastForwardTimer: Virtual clock driven by playback
-- VirtualClock: Coordinator for fast-forward mode
+- FastForwardTimer: Virtual clock driven by event queue
+- VirtualClock: Event-driven coordinator for fast-forward mode
 """
 
 from __future__ import annotations
@@ -118,152 +118,109 @@ class TimerBase(ABC):
 
 
 # =============================================================================
-# Virtual Clock (coordinator for fast-forward mode)
+# Virtual Clock (event-driven coordinator for fast-forward mode)
 # =============================================================================
 
 
 @dataclass(order=True)
-class _Waiter:
-    """A pending timer wakeup in the virtual clock."""
+class _ScheduledEvent:
+    """A pending event in the virtual clock's priority queue."""
 
-    wake_time: int
+    timestamp: int
     seq: int = field(compare=True)  # Tiebreaker for stable ordering
-    event: asyncio.Event = field(compare=False)
+    future: asyncio.Future = field(compare=False)
 
 
 class VirtualClock:
-    """Coordinates virtual time across all tasks in fast-forward mode.
+    """Event-driven coordinator for fast-forward playback.
 
-    The clock maintains the current simulation time and a heap of pending
-    timer wakeups. When advance_to() is called, it wakes all timers whose
-    wake time has been reached, allowing them to run before returning.
+    The clock maintains a priority queue of scheduled events. Each event
+    has a timestamp and an asyncio Future. When schedule() is called,
+    it adds the event to the queue, then pops and wakes the earliest
+    event (which might be itself).
 
-    This enables deterministic execution: timers at time T fire before
-    messages at time T are delivered.
+    This creates a self-driving system: each schedule() call advances
+    the clock one step. The chain continues as woken tasks do their
+    work and call schedule() again.
 
-    Invariants:
-        - Time only moves forward
-        - All waiters with wake_time <= current_time are woken before
-          advance_to() returns
-        - Woken tasks may schedule new timers; if those are still <= target,
-          they are also processed in the same advance_to() call
+    Events are scheduled by:
+    - FastForwardTimer.sleep_until() - for timer.sleep() calls
+    - PlaybackIn.__anext__() - for message delivery from recorded logs
+
+    This ensures deterministic execution: events are processed in
+    timestamp order, and the clock only moves forward.
 
     Example:
         >>> clock = VirtualClock(start_time=1_000_000_000)
         >>> timer = FastForwardTimer(clock)
         >>>
-        >>> # In playback node:
-        >>> async for timestamp, msg in messages:
-        ...     await clock.advance_to(timestamp)
-        ...     publish(msg)
+        >>> # Events drive the clock:
+        >>> await timer.sleep(1.0)  # Schedules event at T+1s
     """
 
     def __init__(self, start_time: int = 0):
         self._time: int = start_time
-        self._waiters: list[_Waiter] = []
+        self._events: list[_ScheduledEvent] = []
         self._seq: int = 0
-        self._advancing: bool = False
 
     def now(self) -> int:
         """Get current virtual time in nanoseconds."""
         return self._time
 
-    async def sleep_until(self, target_ns: int) -> None:
-        """Sleep until virtual time reaches target.
+    async def schedule(self, timestamp: int) -> None:
+        """Schedule an event at the given timestamp and wait for it.
 
-        Returns immediately if target is at or before current time.
-        Otherwise, blocks until advance_to() reaches the target time.
-        """
-        if target_ns <= self._time:
-            return
+        The event is added to the priority queue, then we yield to let other
+        tasks schedule their events. After yielding, the earliest event is
+        popped and woken.
 
-        event = asyncio.Event()
-        waiter = _Waiter(wake_time=target_ns, seq=self._seq, event=event)
-        self._seq += 1
-        heappush(self._waiters, waiter)
-        await event.wait()
-
-    async def advance_to(self, target_ns: int) -> None:
-        """Advance virtual time to target, waking all timers along the way.
-
-        Processing order:
-        1. Pop earliest waiter from heap
-        2. Set clock to waiter's time
-        3. Wake the waiter
-        4. Yield control (waiter runs, may schedule more timers)
-        5. Repeat until no waiters <= target_ns
-        6. Set clock to target_ns
-
-        This ensures that if a woken task schedules another timer that's
-        still before target_ns, it will also be processed before returning.
+        This creates a self-driving clock: each schedule() advances one step,
+        and the woken task will eventually call schedule() again, continuing
+        the chain.
 
         Args:
-            target_ns: Target time to advance to.
-
-        Raises:
-            RuntimeError: If called reentrantly (a woken timer tries to
-                advance the clock).
+            timestamp: Virtual time (ns) when this event should fire.
         """
-        if target_ns < self._time:
-            return  # Can't go backwards
+        # Add ourselves to the queue
+        future: asyncio.Future[None] = asyncio.get_event_loop().create_future()
+        event = _ScheduledEvent(timestamp=timestamp, seq=self._seq, future=future)
+        self._seq += 1
+        heappush(self._events, event)
 
-        if self._advancing:
-            raise RuntimeError(
-                "VirtualClock.advance_to() called reentrantly. "
-                "A woken timer tried to advance the clock, which is not allowed."
-            )
+        # Yield to let other tasks schedule their events
+        await asyncio.sleep(0)
 
-        self._advancing = True
-        try:
-            # Process all waiters up to target time
-            # Note: woken tasks may add new waiters, so we re-check each iteration
-            while self._waiters and self._waiters[0].wake_time <= target_ns:
-                waiter = heappop(self._waiters)
-                self._time = waiter.wake_time
-                waiter.event.set()
-                # Yield to let the woken task run
-                # It may schedule new timers that we need to process
-                await asyncio.sleep(0)
+        # Advance one step: pop and wake the earliest event
+        if self._events:
+            earliest = heappop(self._events)
+            self._time = max(self._time, earliest.timestamp)
+            earliest.future.set_result(None)
 
-            self._time = target_ns
-        finally:
-            self._advancing = False
+        # Wait for our turn (might already be done if we were earliest)
+        await future
 
     def pending_count(self) -> int:
-        """Number of pending timer wakeups."""
-        return len(self._waiters)
+        """Number of pending events in the queue."""
+        return len(self._events)
 
-    def next_wakeup(self) -> int | None:
-        """Timestamp of next pending wakeup, or None if no waiters."""
-        return self._waiters[0].wake_time if self._waiters else None
+    def next_timestamp(self) -> int | None:
+        """Timestamp of next pending event, or None if queue is empty."""
+        return self._events[0].timestamp if self._events else None
 
     async def flush(self) -> None:
-        """Wake all pending timers immediately.
+        """Process all pending events immediately.
 
         This is useful at the end of playback to ensure any timers scheduled
-        by consumers are fired before the graph shuts down. All waiters are
-        woken in timestamp order, with the clock set to each waiter's time.
+        by consumers are fired before the graph shuts down. All events are
+        processed in timestamp order.
 
         After flush completes, pending_count() will be 0.
         """
-        if self._advancing:
-            raise RuntimeError(
-                "VirtualClock.flush() called reentrantly. "
-                "A woken timer tried to flush the clock, which is not allowed."
-            )
-
-        self._advancing = True
-        try:
-            while self._waiters:
-                waiter = heappop(self._waiters)
-                self._time = waiter.wake_time
-                waiter.event.set()
-                # Yield to let the woken task run (may schedule more timers)
-                await asyncio.sleep(0)
-                # Yield again to let any tasks spawned by woken task register
-                await asyncio.sleep(0)
-        finally:
-            self._advancing = False
+        while self._events:
+            earliest = heappop(self._events)
+            self._time = max(self._time, earliest.timestamp)
+            earliest.future.set_result(None)
+            await asyncio.sleep(0)  # Let woken task run
 
 
 # =============================================================================
@@ -322,11 +279,11 @@ class ScaledTimer(TimerBase):
 class FastForwardTimer(TimerBase):
     """Timer for fast-forward playback using VirtualClock.
 
-    All operations delegate to the virtual clock. Time only advances
-    when the playback node calls clock.advance_to().
+    All operations delegate to the virtual clock's event queue. Time only
+    advances when events are processed by advance_next().
 
-    This ensures deterministic execution order: all timers scheduled
-    for time T are woken before messages at time T are delivered.
+    This ensures deterministic execution order: events are processed
+    in timestamp order across all PlaybackIn channels and timer sleeps.
 
     Args:
         clock: The VirtualClock instance that coordinates time.
@@ -347,16 +304,18 @@ class FastForwardTimer(TimerBase):
         return self._clock.now()
 
     async def sleep(self, seconds: float) -> None:
-        """Schedule a wakeup and wait for clock to advance."""
+        """Schedule an event and wait for clock to reach it."""
         if seconds <= 0:
             return
         delay_ns = int(seconds * 1_000_000_000)
         target = self._clock.now() + delay_ns
-        await self._clock.sleep_until(target)
+        await self._clock.schedule(target)
 
     async def sleep_until(self, target_ns: int) -> None:
-        """Wait for clock to advance to target time."""
-        await self._clock.sleep_until(target_ns)
+        """Schedule an event at target time and wait."""
+        if target_ns <= self._clock.now():
+            return
+        await self._clock.schedule(target_ns)
 
 
 # =============================================================================

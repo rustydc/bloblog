@@ -3,190 +3,211 @@
 This module provides transforms for playing back recorded channel data
 from ObLog files, with support for various playback speeds.
 
+Key functions:
+- create_playback_graph: Create a Graph configured for playback
+- with_playback: Transform to inject playback into an existing graph
+
 Example:
     >>> from tinman import Graph
     >>> from tinman.playback import with_playback
     >>> 
     >>> graph = Graph.of(consumer)
-    >>> graph = (await with_playback(Path("logs")))(graph)
+    >>> graph = with_playback(Path("logs"))(graph)
     >>> await graph.run()
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 from time import time_ns
 from typing import TYPE_CHECKING
 
-from .bloblog import amerge
 from .oblog import Codec, ObLogReader
-from .pubsub import Out
+from .pubsub import In
 from .runtime import NodeSpec, get_node_specs
-from .timer import Timer, ScaledTimer, FastForwardTimer, VirtualClock
+from .timer import ScaledTimer, FastForwardTimer, VirtualClock
 
 if TYPE_CHECKING:
     from .launcher import Graph
 
 
-async def create_playback_graph(
-    nodes: list[Callable | NodeSpec],
-    playback_dir: Path,
-    speed: float = 1.0,
-    clock: VirtualClock | None = None,
-) -> tuple[list[Callable | NodeSpec], int | None]:
-    """Create a graph with playback nodes injected for missing inputs.
+class PlaybackIn[T]:
+    """Input channel that reads from recorded logs with event-driven timing.
 
-    This function analyzes the given nodes to find which channels they need,
+    Each PlaybackIn reads from a blog file and schedules events in the
+    VirtualClock. When __anext__ is called, it reads the next message
+    from the log, schedules an event at that message's timestamp, and
+    waits for the clock to process it.
+
+    Multiple PlaybackIn instances (for different channels or different
+    subscribers to the same channel) naturally interleave through the
+    shared clock's priority queue.
+
+    For speed-controlled playback (not fast-forward), timing is handled
+    differently: we use wall-clock delays based on recorded timestamps.
+    """
+
+    def __init__(
+        self,
+        reader: AsyncGenerator[tuple[int, T], None],
+        clock: VirtualClock | None = None,
+        speed: float = float('inf'),
+    ) -> None:
+        """Initialize a playback input channel.
+
+        Args:
+            reader: Async generator yielding (timestamp, item) from ObLogReader.
+            clock: VirtualClock for fast-forward mode (required if speed=inf).
+            speed: Playback speed multiplier (inf = fast-forward).
+        """
+        self._reader = reader
+        self._clock = clock
+        self._speed = speed
+        self._timestamp: int = 0
+        self._start_time: int | None = None
+        self._start_real: int | None = None
+        self._exhausted = False
+
+    def __aiter__(self) -> "PlaybackIn[T]":
+        return self
+
+    async def __anext__(self) -> T:
+        if self._exhausted:
+            raise StopAsyncIteration
+
+        try:
+            timestamp, item = await anext(self._reader)
+        except StopAsyncIteration:
+            self._exhausted = True
+            raise
+
+        # Handle timing based on mode
+        if self._speed == float('inf'):
+            # Fast-forward: schedule event in clock and wait
+            assert self._clock is not None
+            await self._clock.schedule(timestamp)
+        elif self._speed > 0:
+            # Speed-controlled: delay based on wall clock
+            if self._start_time is None:
+                self._start_time = timestamp
+                self._start_real = time_ns()
+            else:
+                elapsed_log = timestamp - self._start_time
+                assert self._start_real is not None
+                target_real = self._start_real + int(elapsed_log / self._speed)
+                current = time_ns()
+                if current < target_real:
+                    await asyncio.sleep((target_real - current) / 1e9)
+
+        self._timestamp = timestamp
+        return item
+
+    @property
+    def timestamp(self) -> int:
+        """Timestamp of the most recently read message."""
+        return self._timestamp
+
+
+async def create_playback_graph(
+    graph: "Graph",
+    playback_dir: Path,
+    speed: float = float('inf'),
+) -> "Graph":
+    """Configure a graph for playback from recorded logs.
+
+    This function analyzes the graph to find which channels are needed,
     checks which channels are missing (not produced by any node), and creates
-    a playback node to provide those channels from recorded logs.
+    PlaybackIn instances to provide those channels from recorded logs.
 
     Args:
-        nodes: List of node callables to run.
+        graph: The graph to configure for playback.
         playback_dir: Directory containing .blog log files.
         speed: Playback speed multiplier (1.0 = real-time, 2.0 = 2x speed, 
-               inf = fast-forward).
-        clock: VirtualClock for fast-forward mode. Required if speed=inf.
-               The playback node will advance this clock as it processes messages.
+               float('inf') = fast-forward as fast as possible).
 
     Returns:
-        Tuple of (graph, first_timestamp) where:
-        - graph: List of nodes with playback nodes injected
-        - first_timestamp: Timestamp (ns) of first message across all channels,
-          or None if no playback needed
+        The configured graph (same instance, mutated in place).
 
     Raises:
         FileNotFoundError: If a required log file doesn't exist.
-        ValueError: If speed=inf but no clock provided.
 
     Example:
-        >>> # Record some data
-        >>> await run([producer, create_recording_node(Path("logs"), codecs)])
-        >>> # Play back later (real-time)
-        >>> graph, first_ts = await create_playback_graph([consumer], Path("logs"))
-        >>> await run_nodes(graph)
-        >>> # Fast-forward playback
-        >>> clock = VirtualClock()
-        >>> timer = FastForwardTimer(clock)
-        >>> graph = await create_playback_graph([consumer], Path("logs"), speed=float('inf'), clock=clock)
-        >>> await run_nodes(graph, timer=timer)
+        >>> graph = await create_playback_graph(
+        ...     Graph.of(consumer),
+        ...     Path("logs"),
+        ...     speed=float('inf'),
+        ... )
+        >>> await graph.run()
     """
-    if speed == float('inf') and clock is None:
-        raise ValueError("Fast-forward mode (speed=inf) requires a VirtualClock")
+    # Create clock for fast-forward mode
+    clock: VirtualClock | None = None
+    if speed == float('inf'):
+        clock = VirtualClock()
 
     # Parse nodes to find what channels are needed and what's provided
-    specs = get_node_specs(nodes)
+    specs = get_node_specs(graph.nodes)
     all_inputs: set[str] = set()
     all_outputs: set[str] = set()
 
+    # Count subscribers per channel
+    channel_subscriber_count: dict[str, int] = {}
     for spec in specs:
         for _, (channel_name, _) in spec.inputs.items():
             all_inputs.add(channel_name)
+            channel_subscriber_count[channel_name] = channel_subscriber_count.get(channel_name, 0) + 1
         for _, (channel_name, _) in spec.outputs.items():
             all_outputs.add(channel_name)
 
     # Find channels that need playback
     missing_channels = all_inputs - all_outputs
 
-    if not missing_channels:
-        # No playback needed
-        return list(nodes), None
-
-    # Read codecs and first timestamps for all missing channels
-    oblog = ObLogReader(playback_dir)
-    channel_codecs: dict[str, Codec] = {}
+    playback_channels: dict[str, tuple[Codec, list[PlaybackIn]]] = {}
     first_timestamp: int | None = None
+
+    if missing_channels:
+        # Read codecs and first timestamps for all missing channels
+        oblog = ObLogReader(playback_dir)
+
+        for channel in missing_channels:
+            try:
+                codec = await oblog.read_codec(channel)
+                # Get first timestamp for this channel
+                ts = await oblog.first_timestamp(channel)
+                if ts is not None and (first_timestamp is None or ts < first_timestamp):
+                    first_timestamp = ts
+
+                # Create one PlaybackIn per subscriber
+                num_subscribers = channel_subscriber_count.get(channel, 1)
+                playback_ins: list[PlaybackIn] = []
+                for _ in range(num_subscribers):
+                    # Each subscriber gets its own reader (sharing the mmap)
+                    reader = oblog.read_channel(channel)
+                    playback_in = PlaybackIn(reader, clock=clock, speed=speed)
+                    playback_ins.append(playback_in)
+
+                playback_channels[channel] = (codec, playback_ins)
+
+            except FileNotFoundError:
+                raise FileNotFoundError(
+                    f"No log file for channel '{channel}' in {playback_dir}"
+                )
+
+    # Configure the graph
+    graph._playback_channels = playback_channels
+    graph._clock = clock
     
-    for channel in missing_channels:
-        try:
-            codec = await oblog.read_codec(channel)
-            channel_codecs[channel] = codec
-            # Get first timestamp for this channel
-            ts = await oblog.first_timestamp(channel)
-            if ts is not None and (first_timestamp is None or ts < first_timestamp):
-                first_timestamp = ts
-        except FileNotFoundError:
-            raise FileNotFoundError(
-                f"No log file for channel '{channel}' in {playback_dir}"
-            )
+    # Create timer based on speed
+    if speed == float('inf'):
+        assert clock is not None
+        if first_timestamp is not None:
+            clock._time = first_timestamp
+        graph.timer = FastForwardTimer(clock)
+    else:
+        graph.timer = ScaledTimer(speed, start_time=first_timestamp)
 
-    # Create a single playback node that outputs all missing channels
-    # Capture oblog in closure so we reuse the same reader
-    async def playback_node(**outputs: Out) -> None:
-        """Playback node that reads from logs and publishes to output channels."""
-        # Build list of channels for index mapping
-        channel_list = list(channel_codecs.items())
-
-        # Set up readers for all channels using the shared oblog reader
-        readers = [oblog.read_channel(channel_name) for channel_name, _codec in channel_list]
-
-        # Merge all streams and publish with timing
-        start_time: int | None = None
-        start_real: int | None = None
-        first_message = True
-
-        async for source_idx, timestamp, item in amerge(*readers):
-            channel_name, _ = channel_list[source_idx]
-            out = outputs[channel_name]
-
-            if speed == float('inf'):
-                # Fast-forward mode: advance virtual clock
-                assert clock is not None
-                if first_message:
-                    # Initialize clock to first message timestamp
-                    clock._time = timestamp
-                    first_message = False
-                else:
-                    # Advance clock, waking any timers in between
-                    await clock.advance_to(timestamp)
-                
-                # Publish and yield to let consumer process at this timestamp
-                await out.publish(item)
-                await asyncio.sleep(0)
-            else:
-                # Speed-controlled playback with real delays
-                if speed > 0:
-                    if start_time is None:
-                        start_time = timestamp
-                        start_real = time_ns()
-                        first_message = False
-                    else:
-                        # Calculate target time
-                        elapsed_log = timestamp - start_time
-                        assert start_real is not None
-                        target_real = start_real + int(elapsed_log / speed)
-                        current = time_ns()
-
-                        # Sleep if needed
-                        if current < target_real:
-                            await asyncio.sleep((target_real - current) / 1e9)
-
-                await out.publish(item)
-
-        # After all messages, flush any remaining timers
-        if speed == float('inf') and clock is not None:
-            # Yield to let consumers process their messages and schedule timers
-            await asyncio.sleep(0)
-            # Wake all pending timers
-            await clock.flush()
-
-    # Create NodeSpec for the playback node with output annotations
-    playback_outputs = {
-        channel_name: (channel_name, codec)
-        for channel_name, codec in channel_codecs.items()
-    }
-    playback_spec = NodeSpec(
-        node_fn=playback_node,
-        inputs={},
-        outputs=playback_outputs,
-        all_channels_param=None,
-        timer_param=None,
-        name="playback_node",
-    )
-
-    # Return playback node + original nodes, and first timestamp
-    return [playback_spec, *nodes], first_timestamp
+    return graph
 
 
 def with_playback(
@@ -194,13 +215,16 @@ def with_playback(
     speed: float = float('inf'),
     use_virtual_time_logs: bool = False,
 ) -> Callable[["Graph"], "Graph"]:
-    """Inject playback nodes for missing inputs.
+    """Inject playback for missing inputs.
+    
+    This is a convenience wrapper around create_playback_graph() that can be
+    used synchronously before entering an async context.
     
     Analyzes the graph to find which channels are needed but not produced,
-    then creates playback nodes to provide those channels from recorded logs.
+    then creates PlaybackIn channels to provide those from recorded logs.
     
-    Note: This transform must be applied before Graph.run() is called, as it
-    needs to read log metadata synchronously. If you're already in an async
+    Note: This uses asyncio.run() internally, so it cannot be called from
+    within an existing async event loop. If you're already in an async
     context, use create_playback_graph() directly.
     
     Args:
@@ -220,34 +244,17 @@ def with_playback(
         >>> await graph.run()
     """
     def transform(g: "Graph") -> "Graph":
-        # Create clock for fast-forward mode
-        clock: VirtualClock | None = None
-        if speed == float('inf'):
-            clock = VirtualClock()
-        
         # Run async playback graph creation synchronously
         # This is safe because we're not yet in an event loop
-        playback_nodes, first_timestamp = asyncio.run(
-            create_playback_graph(g.nodes, playback_dir, speed=speed, clock=clock)
+        configured = asyncio.run(
+            create_playback_graph(g, playback_dir, speed=speed)
         )
         
-        # Update graph nodes (playback node is prepended by create_playback_graph)
-        g.nodes = list(playback_nodes)
-        
-        # Create timer based on speed
-        if speed == float('inf'):
-            assert clock is not None
-            if first_timestamp is not None:
-                clock._time = first_timestamp
-            g.timer = FastForwardTimer(clock)
-        else:
-            g.timer = ScaledTimer(speed, start_time=first_timestamp)
-        
         # Handle virtual time logs
-        if use_virtual_time_logs and g.timer is not None:
+        if use_virtual_time_logs and configured.timer is not None:
             from .logging import install_timer_log_factory
-            install_timer_log_factory(g.timer)
+            install_timer_log_factory(configured.timer)
         
-        return g
+        return configured
     
     return transform

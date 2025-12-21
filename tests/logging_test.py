@@ -498,12 +498,12 @@ class TestTimerLogFactory:
                 logger.info("At time 0")  # t=0
                 
                 # Manually advance clock (simulating what playback does)
-                import asyncio
-                asyncio.run(clock.advance_to(5_000_000_000))  # 5 seconds
+                # In the new event-driven clock, we directly set _time for testing
+                clock._time = 5_000_000_000  # 5 seconds
                 
                 logger.info("At time 5")  # t=5s
                 
-                asyncio.run(clock.advance_to(10_000_000_000))  # 10 seconds
+                clock._time = 10_000_000_000  # 10 seconds
                 
                 logger.info("At time 10")  # t=10s
             

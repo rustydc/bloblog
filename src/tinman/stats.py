@@ -215,7 +215,12 @@ def create_stats_node(
         async def collect_channel(name: str, channel: In) -> None:
             """Collect stats for a single channel."""
             async for _item in channel:
-                collector.record(name, timer.time_ns(), time.time_ns())
+                # Try to get timestamp from channel (PlaybackIn has it),
+                # fall back to timer for regular In channels
+                timestamp = getattr(channel, 'timestamp', None)
+                if timestamp is None or timestamp == 0:
+                    timestamp = timer.time_ns()
+                collector.record(name, timestamp, time.time_ns())
         
         async def periodic_printer() -> None:
             """Print stats periodically if configured."""

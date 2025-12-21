@@ -7,7 +7,7 @@ from typing import Annotated
 import pytest
 from .test_utils import StringCodec, make_consumer_node, make_producer_node, make_transform_node
 
-from tinman import In, Out, ObLogReader, get_node_specs
+from tinman import In, Out, ObLogReader, get_node_specs, Graph
 from tinman.runtime import run_nodes
 from tinman.recording import create_recording_node
 from tinman.playback import create_playback_graph
@@ -188,14 +188,11 @@ class TestPlayback:
                 if len(received) >= len(messages):
                     break
 
-        # Use explicit playback graph
-        from tinman.timer import VirtualClock, FastForwardTimer
-        clock = VirtualClock()
-        graph, first_ts = await create_playback_graph([live_consumer], tmp_path, speed=float('inf'), clock=clock)
-        timer = FastForwardTimer(clock)
-        if first_ts:
-            clock._time = first_ts
-        await run_nodes(graph, timer=timer)
+        # Use create_playback_graph - returns a configured Graph
+        graph = await create_playback_graph(
+            Graph.of(live_consumer), tmp_path, speed=float('inf')
+        )
+        await graph.run()
 
         assert received == messages
 
@@ -208,7 +205,7 @@ class TestPlayback:
 
         # Should raise when trying to create playback graph for missing channel
         with pytest.raises(FileNotFoundError, match="No log file for channel"):
-            await create_playback_graph([consumer_of_missing], tmp_path)
+            await create_playback_graph(Graph.of(consumer_of_missing), tmp_path)
 
 
 class TestPlaybackNode:
@@ -226,14 +223,13 @@ class TestPlaybackNode:
         reader = ObLogReader(tmp_path)
         codec = await reader.read_codec("test_output")
         
+        
         # Verify it's the right type
         assert isinstance(codec, StringCodec)
     
     @pytest.mark.asyncio
     async def test_create_playback_graph(self, tmp_path):
         """Test that create_playback_graph creates a working playback node."""
-        from tinman.timer import VirtualClock, FastForwardTimer
-        
         # First, record some data
         messages = ["play1", "play2", "play3"]
         producer = make_producer_node("recorded", messages)
@@ -248,25 +244,18 @@ class TestPlaybackNode:
             async for msg in inp:
                 received.append(msg)
         
-        # Create playback graph - this should automatically add playback node
-        clock = VirtualClock()
-        graph, first_ts = await create_playback_graph([consumer], tmp_path, speed=float('inf'), clock=clock)
-        timer = FastForwardTimer(clock)
-        if first_ts:
-            clock._time = first_ts
-        
-        # Verify it added a playback node
-        assert len(graph) == 2  # playback + consumer
+        # Create playback graph - returns a configured Graph
+        graph = await create_playback_graph(
+            Graph.of(consumer), tmp_path, speed=float('inf')
+        )
         
         # Run and verify
-        await run_nodes(graph, timer=timer)
+        await graph.run()
         assert received == messages
     
     @pytest.mark.asyncio
     async def test_playback_with_speed_control(self, tmp_path):
         """Test that playback respects speed parameter."""
-        from tinman.timer import ScaledTimer
-        
         # Record data with some delay
         messages = ["msg1", "msg2"]
         producer = make_producer_node("timed", messages)
@@ -283,11 +272,12 @@ class TestPlaybackNode:
                 received.append(msg)
                 timestamps.append(time.time())
         
-        graph, first_ts = await create_playback_graph([consumer], tmp_path, speed=2.0)
-        timer = ScaledTimer(2.0, start_time=first_ts)
+        graph = await create_playback_graph(
+            Graph.of(consumer), tmp_path, speed=2.0
+        )
         
         start = time.time()
-        await run_nodes(graph, timer=timer)
+        await graph.run()
         duration = time.time() - start
         
         assert received == messages
@@ -301,4 +291,4 @@ class TestPlaybackNode:
             pass
         
         with pytest.raises(FileNotFoundError, match="No log file for channel"):
-            await create_playback_graph([consumer], tmp_path)
+            await create_playback_graph(Graph.of(consumer), tmp_path)

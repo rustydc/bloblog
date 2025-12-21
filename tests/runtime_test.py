@@ -256,7 +256,7 @@ class TestTimerInjection:
     
     @pytest.mark.asyncio
     async def test_timer_sleep_works(self):
-        """Test that the injected timer's sleep works."""
+        """Test that the injected timer's sleep works with event-driven clock."""
         from tinman import Timer, VirtualClock, FastForwardTimer
         from tinman.runtime import run_nodes
         import asyncio
@@ -264,25 +264,25 @@ class TestTimerInjection:
         clock = VirtualClock(start_time=0)
         timer = FastForwardTimer(clock)
         sleep_completed = False
+        time_after_sleep = None
         
         async def timed_producer(
             timer: Timer,
             out: Annotated[Out[str], "data", StringCodec()]
         ) -> None:
-            nonlocal sleep_completed
-            # Schedule a sleep
-            sleep_task = asyncio.create_task(timer.sleep(1.0))
-            await asyncio.sleep(0)  # Let it start
-            # Advance the clock
-            await clock.advance_to(1_000_000_000)
-            await sleep_task
+            nonlocal sleep_completed, time_after_sleep
+            # Sleep should schedule an event and wait
+            await timer.sleep(1.0)
             sleep_completed = True
+            time_after_sleep = timer.time_ns()
             await out.publish("hello")
         
         consumer, _ = make_consumer_node("data", 1)
-        await run_nodes([timed_producer, consumer], timer=timer)
+        await run_nodes([timed_producer, consumer], timer=timer, clock=clock)
         
         assert sleep_completed
+        # After sleep(1.0), clock should have advanced to 1 second
+        assert time_after_sleep == 1_000_000_000
 
 
 class TestNodeNames:

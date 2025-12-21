@@ -16,12 +16,13 @@ from logging import getLogger
 from typing import Annotated
 
 from tinman import In, Out
+from tinman.codecs import StringCodec
 
 _logger = getLogger(__name__)
 
 
 # Example 1: Simple function node
-async def producer(output: Annotated[Out[str], "messages"]):
+async def producer(output: Annotated[Out[str], "messages", StringCodec()]):
     for i in range(1, 6):
         msg = f"Message {i}"
         _logger.info(f"Producer: Sending '{msg}'")
@@ -32,7 +33,7 @@ async def producer(output: Annotated[Out[str], "messages"]):
 # Example 2: Transform node
 async def uppercase(
     input: Annotated[In[str], "messages"],
-    output: Annotated[Out[str], "uppercase"],
+    output: Annotated[Out[str], "uppercase", StringCodec()],
 ):
     async for msg in input:
         _logger.info(f"Uppercase: Transforming '{msg}' to '{msg.upper()}'")
