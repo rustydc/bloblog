@@ -307,12 +307,49 @@ def run(
         asyncio.run(g.run())
 
 
+def _parse_duration(value: str) -> float:
+    """Parse a duration string like '10s', '5m', '1.5h' into seconds.
+    
+    Supported suffixes:
+        s, sec, secs, second, seconds - seconds
+        m, min, mins, minute, minutes - minutes  
+        h, hr, hrs, hour, hours - hours
+        
+    If no suffix, assumes seconds.
+    """
+    value = value.strip().lower()
+    
+    # Try parsing as a plain number first
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    
+    # Parse with suffix
+    import re
+    match = re.match(r'^([0-9.]+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours)$', value)
+    if not match:
+        raise ValueError(f"Invalid duration format: '{value}'. Use formats like '10s', '5m', '1.5h', or just a number for seconds.")
+    
+    num = float(match.group(1))
+    unit = match.group(2)
+    
+    if unit.startswith('h'):
+        return num * 3600
+    elif unit.startswith('m'):
+        return num * 60
+    else:  # seconds
+        return num
+
+
 @app.command
 def playback(
     nodes: tuple[str, ...],
     *,
     from_: Annotated[Path | None, cyclopts.Parameter(name=["--from", "-f"])] = None,
     speed: float = float("inf"),
+    start: Annotated[str | None, cyclopts.Parameter(name=["--start", "-s"])] = None,
+    end: Annotated[str | None, cyclopts.Parameter(name=["--end", "-e"])] = None,
     log_dir: Path | None = None,
     pickle: bool = False,
     capture_logs: bool = True,
@@ -334,6 +371,12 @@ def playback(
     speed
         Playback speed multiplier. Use 'inf' for fast-forward (default),
         1.0 for real-time, 2.0 for double speed, etc.
+    start
+        Start playback at this offset from the beginning of the log.
+        Supports formats like '10s', '5m', '1.5h', or just a number for seconds.
+    end
+        End playback at this offset from the beginning of the log.
+        Supports formats like '30s', '2m', '0.5h', or just a number for seconds.
     log_dir
         Directory to log output channels (for recording transformed data).
     pickle
@@ -360,6 +403,8 @@ def playback(
     $ tinman playback myapp:consumer  # uses latest ~/.tinman/logs/
     $ tinman playback myapp:consumer --from logs/
     $ tinman playback myapp:consumer --from logs/ --speed 1.0
+    $ tinman playback myapp:consumer --start 10s --end 30s  # play 10s to 30s
+    $ tinman playback myapp:consumer -s 1m -e 2m  # play minute 1 to 2
     $ tinman playback myapp:transform --from logs/ --log-dir processed/
     $ tinman playback myapp:consumer --stats
     $ tinman playback myapp:consumer --graph graph.dot
@@ -369,6 +414,22 @@ def playback(
         from_ = _get_latest_log_dir()
         if from_ is None:
             print("Error: No log directory specified and no logs found in ~/.tinman/logs/", file=sys.stderr)
+            sys.exit(1)
+    
+    # Parse start/end intervals
+    start_offset: float | None = None
+    end_offset: float | None = None
+    if start is not None:
+        try:
+            start_offset = _parse_duration(start)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    if end is not None:
+        try:
+            end_offset = _parse_duration(end)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
     
     if pickle:
@@ -408,7 +469,13 @@ def playback(
             g.nodes.append(create_recording_node(log_dir, g.nodes))
         
         # Apply playback transform
-        g = with_playback(from_, speed=speed, use_virtual_time_logs=use_virtual_time)(g)
+        g = with_playback(
+            from_,
+            speed=speed,
+            use_virtual_time_logs=use_virtual_time,
+            start_offset=start_offset,
+            end_offset=end_offset,
+        )(g)
         
         # If --graph specified, output DOT
         if graph is not None:

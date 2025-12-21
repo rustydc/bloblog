@@ -722,7 +722,7 @@ def format_log_entry(
     
     text = Text()
     #text.append("[", style="blue")
-    text.append(time_str)
+    text.append(time_str, style="dim")
     text.append("·", style="blue")
     text.append(level_char, style=level_style)
     text.append("·", style="blue")

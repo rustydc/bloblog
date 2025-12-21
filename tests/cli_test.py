@@ -114,3 +114,57 @@ class TestLoadNodes:
         assert len(nodes) == 1
         # It's the factory itself, not called
         assert nodes[0] is factory_with_required_args
+
+
+class TestParseDuration:
+    """Tests for the _parse_duration function."""
+    
+    def test_plain_number(self):
+        from tinman.cli import _parse_duration
+        assert _parse_duration("10") == 10.0
+        assert _parse_duration("1.5") == 1.5
+        assert _parse_duration("0.25") == 0.25
+    
+    def test_seconds(self):
+        from tinman.cli import _parse_duration
+        assert _parse_duration("10s") == 10.0
+        assert _parse_duration("1.5sec") == 1.5
+        assert _parse_duration("2secs") == 2.0
+        assert _parse_duration("3second") == 3.0
+        assert _parse_duration("4seconds") == 4.0
+    
+    def test_minutes(self):
+        from tinman.cli import _parse_duration
+        assert _parse_duration("1m") == 60.0
+        assert _parse_duration("1.5min") == 90.0
+        assert _parse_duration("2mins") == 120.0
+        assert _parse_duration("3minute") == 180.0
+        assert _parse_duration("4minutes") == 240.0
+    
+    def test_hours(self):
+        from tinman.cli import _parse_duration
+        assert _parse_duration("1h") == 3600.0
+        assert _parse_duration("1.5hr") == 5400.0
+        assert _parse_duration("2hrs") == 7200.0
+        assert _parse_duration("3hour") == 10800.0
+        assert _parse_duration("4hours") == 14400.0
+    
+    def test_whitespace(self):
+        from tinman.cli import _parse_duration
+        assert _parse_duration("  10s  ") == 10.0
+        assert _parse_duration("5 m") == 300.0
+    
+    def test_case_insensitive(self):
+        from tinman.cli import _parse_duration
+        assert _parse_duration("10S") == 10.0
+        assert _parse_duration("5M") == 300.0
+        assert _parse_duration("1H") == 3600.0
+    
+    def test_invalid_format_raises(self):
+        from tinman.cli import _parse_duration
+        with pytest.raises(ValueError, match="Invalid duration format"):
+            _parse_duration("abc")
+        with pytest.raises(ValueError, match="Invalid duration format"):
+            _parse_duration("10x")
+        with pytest.raises(ValueError, match="Invalid duration format"):
+            _parse_duration("ten seconds")

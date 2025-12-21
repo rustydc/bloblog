@@ -458,3 +458,110 @@ class TestConvenienceFunctions:
         
         await graph.run()
         assert received == messages
+
+    @pytest.mark.asyncio
+    async def test_playback_with_start_offset(self, tmp_path):
+        """Test that start_offset skips records before the offset."""
+        import time as time_module
+        
+        # Record messages with artificial delays to spread timestamps
+        messages = ["msg0", "msg1", "msg2", "msg3", "msg4"]
+        
+        async def producer(
+            output: Annotated[Out[str], "timed_output", StringCodec()],
+        ):
+            for msg in messages:
+                await output.publish(msg)
+                await asyncio.sleep(0.01)  # 10ms between messages
+        
+        logger = create_recording_node(tmp_path, [producer])
+        await run_nodes([producer, logger])
+        
+        # Play back with start_offset=0.025s (should skip first 2-3 messages)
+        received = []
+        
+        async def consumer(inp: Annotated[In[str], "timed_output"]) -> None:
+            async for msg in inp:
+                received.append(msg)
+        
+        graph = await create_playback_graph(
+            Graph.of(consumer), tmp_path, speed=float('inf'),
+            start_offset=0.025,
+        )
+        await graph.run()
+        
+        # Should have skipped some messages
+        assert len(received) < len(messages)
+        # The remaining messages should be from later in the sequence
+        assert received[-1] == messages[-1]  # Last message should be there
+
+    @pytest.mark.asyncio
+    async def test_playback_with_end_offset(self, tmp_path):
+        """Test that end_offset stops playback at the offset."""
+        # Record messages with artificial delays
+        messages = ["msg0", "msg1", "msg2", "msg3", "msg4"]
+        
+        async def producer(
+            output: Annotated[Out[str], "timed_output", StringCodec()],
+        ):
+            for msg in messages:
+                await output.publish(msg)
+                await asyncio.sleep(0.01)  # 10ms between messages
+        
+        logger = create_recording_node(tmp_path, [producer])
+        await run_nodes([producer, logger])
+        
+        # Play back with end_offset=0.025s (should stop after first 2-3 messages)
+        received = []
+        
+        async def consumer(inp: Annotated[In[str], "timed_output"]) -> None:
+            async for msg in inp:
+                received.append(msg)
+        
+        graph = await create_playback_graph(
+            Graph.of(consumer), tmp_path, speed=float('inf'),
+            end_offset=0.025,
+        )
+        await graph.run()
+        
+        # Should have stopped early
+        assert len(received) < len(messages)
+        # First message should be there
+        assert received[0] == messages[0]
+
+    @pytest.mark.asyncio
+    async def test_playback_with_start_and_end_offset(self, tmp_path):
+        """Test that both start and end offsets define a window."""
+        # Record messages with delays
+        messages = ["msg0", "msg1", "msg2", "msg3", "msg4"]
+        
+        async def producer(
+            output: Annotated[Out[str], "timed_output", StringCodec()],
+        ):
+            for msg in messages:
+                await output.publish(msg)
+                await asyncio.sleep(0.02)  # 20ms between messages
+        
+        logger = create_recording_node(tmp_path, [producer])
+        await run_nodes([producer, logger])
+        
+        # Play back from 0.025s to 0.065s (should get middle messages)
+        received = []
+        
+        async def consumer(inp: Annotated[In[str], "timed_output"]) -> None:
+            async for msg in inp:
+                received.append(msg)
+        
+        graph = await create_playback_graph(
+            Graph.of(consumer), tmp_path, speed=float('inf'),
+            start_offset=0.025,
+            end_offset=0.065,
+        )
+        await graph.run()
+        
+        # Should have only messages from the middle
+        assert len(received) > 0
+        assert len(received) < len(messages)
+        # First and last messages should not be present
+        assert messages[0] not in received
+        assert messages[-1] not in received
